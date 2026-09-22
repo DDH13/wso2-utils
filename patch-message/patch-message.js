@@ -45,9 +45,13 @@
     function getDeliverables(doc) {
         // The same file change is listed once per applicable product
         // profile (wso2am, wso2am-tm, ...) - dedupe across profiles.
+        // Each product also has a separate "Bundles Info Changes" table
+        // (id="budlesInfoChanges" - a WSO2 typo, not "bundles") listing
+        // bundles.info rows keyed by jar name/version, not File/Operation -
+        // exclude it, we only want the file-changes table.
         const seen = new Map();
         getProductDivs(doc).forEach(div => {
-            div.querySelectorAll('table tbody tr').forEach(tr => {
+            div.querySelectorAll('table:not(#budlesInfoChanges) tbody tr').forEach(tr => {
                 const cells = [...tr.children].map(td => td.textContent.trim());
                 if (!cells[0]) return;
                 const key = `${cells[1] || ''}::${cells[0]}`;
