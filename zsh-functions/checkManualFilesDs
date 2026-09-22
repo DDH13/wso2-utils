@@ -1,0 +1,216 @@
+checkManualFilesDs() {
+  local DS_PATCH_PACKS_DIR="/Users/dineth/Code/APIM-packs-patches/Distributed-Setup"
+  local MIN_ARM64_VERSION="4.6.0"
+  local VERSION="$1"
+
+  # 1. Validation
+  if [[ -z "$VERSION" ]]; then
+    echo "❌ Error: No version number supplied."
+    return 1
+  fi
+
+  local VERSION_DIR="${VERSION%.*}"
+  local VERSION_PACKS_DIR="${DS_PATCH_PACKS_DIR}/${VERSION_DIR}"
+
+  if [[ ! -d "$VERSION_PACKS_DIR" ]]; then
+    echo "❌ Error: Version folder not found: $VERSION_PACKS_DIR"
+    return 1
+  fi
+
+  local EMAIL="${APIM_EMAIL:-dinethh@wso2.com}"
+
+  # 2. Run a normal freshPackDs first and wait for it to finish.
+  echo "🚀 Running freshPackDs for $VERSION..."
+  freshPackDs "$VERSION"
+  if [[ $? -ne 0 ]]; then
+    echo "❌ freshPackDs failed. Aborting."
+    return 1
+  fi
+
+  # 3. The three packs that make up the distributed setup
+  local PACK_LABELS=("acp" "tm" "gw")
+  local PACK_NAMES=("wso2am-acp-${VERSION}" "wso2am-tm-${VERSION}" "wso2am-universal-gw-${VERSION}")
+  local -a TARGET_DIRS
+  local i
+  for i in {1..3}; do
+    TARGET_DIRS+=("${VERSION_PACKS_DIR}/${PACK_NAMES[$i]}")
+  done
+
+  # 4. Prompt for manual file paths, one at a time, validating immediately
+  #    against all three components. Once done, confirm before staging.
+  echo "───────────────────────────────────"
+  echo "📝 Enter file paths (relative to each pack home), one per line."
+  echo "   e.g. repository/resources/conf/templates/repository/conf/carbon.xml.j2"
+  echo "   Each path is checked against all three components (acp, tm, gw)."
+  echo "   Press Enter on an empty line when done."
+
+  local -a FILES=()
+  local rel confirm
+  while true; do
+    while true; do
+      read -r "rel?  > "
+      [[ -z "$rel" ]] && break
+
+      local -a missing_labels=()
+      for i in {1..3}; do
+        [[ ! -f "${TARGET_DIRS[$i]}/${rel}" ]] && missing_labels+=("${PACK_LABELS[$i]}")
+      done
+
+      if [[ ${#missing_labels[@]} -eq 0 ]]; then
+        FILES+=("$rel")
+      else
+        echo "⚠️  Not found in [${(j:, :)missing_labels}]: $rel — check the path and try again."
+      fi
+    done
+
+    if [[ ${#FILES[@]} -eq 0 ]]; then
+      echo "❌ Error: No file paths provided."
+      return 1
+    fi
+
+    echo "───────────────────────────────────"
+    echo "You entered ${#FILES[@]} file(s):"
+    local f
+    for f in "${FILES[@]}"; do
+      echo "  - $f"
+    done
+
+    read -r "confirm?Finished entering paths? Proceed to staging update? (y/n) "
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+      break
+    fi
+    echo "↩️  Continuing to accept more file paths..."
+  done
+
+  # 5. Snapshot the requested files (per component) before the staging update.
+  local BASELINE_DIR=$(mktemp -d)
+  local f
+  for i in {1..3}; do
+    local LABEL="${PACK_LABELS[$i]}"
+    for f in "${FILES[@]}"; do
+      mkdir -p "$(dirname "${BASELINE_DIR}/${LABEL}/${f}")"
+      cp "${TARGET_DIRS[$i]}/${f}" "${BASELINE_DIR}/${LABEL}/${f}"
+    done
+  done
+
+  # 6. Determine Update Tool Binary
+  local UPDATE_TOOL
+  if [[ "$(printf '%s\n%s' "$MIN_ARM64_VERSION" "$VERSION" | sort -V | head -n1)" == "$MIN_ARM64_VERSION" ]]; then
+    UPDATE_TOOL="./wso2update_darwin_arm64"
+  else
+    UPDATE_TOOL="./wso2update_darwin"
+  fi
+
+  # --- Fetch Password Securely ---
+  local WSO2_PASS
+  if ! WSO2_PASS=$(security find-generic-password -a "$EMAIL" -s "wso2-update" -w 2>/dev/null); then
+    echo "❌ Error: Password not found in Keychain for $EMAIL."
+    echo "💡 Run this command once to save it: security add-generic-password -a \"$EMAIL\" -s \"wso2-update\" -w"
+    rm -rf "$BASELINE_DIR"
+    return 1
+  fi
+  # --------------------------------
+
+  # 6a. Runs the update tool against a pack's bin dir at the TESTING update
+  #     level, handling the tool's own self-update.
+  _run_staging_update_tool() {
+    local target_dir="$1"
+    cd "${target_dir}/bin" || exit 1
+    export WSO2_UPDATES_UPDATE_LEVEL_STATE=TESTING
+
+    local TMP_LOG=$(mktemp)
+    $UPDATE_TOOL -u "$EMAIL" -p "$WSO2_PASS" | tee "$TMP_LOG"
+    local UPDATE_EXIT=${pipestatus[1]}
+
+    if grep -q "Please re-run the tool" "$TMP_LOG"; then
+      echo "⚡ Update tool updated itself. Running for the second time..."
+      $UPDATE_TOOL -u "$EMAIL" -p "$WSO2_PASS"
+      UPDATE_EXIT=$?
+    fi
+
+    rm -f "$TMP_LOG"
+    exit $UPDATE_EXIT
+  }
+
+  # 7. Run the staging update for the first pack alone, in the foreground —
+  #    same self-update race avoidance as freshPackDs.
+  echo "───────────────────────────────────"
+  echo "🧪 Running staging (TESTING) update for ${PACK_LABELS[1]} first (resolves any tool self-update safely)..."
+
+  (
+    _run_staging_update_tool "${TARGET_DIRS[1]}"
+  )
+
+  if [[ $? -eq 0 ]]; then
+    echo "✅ ${PACK_LABELS[1]} pack staged successfully."
+  else
+    echo "❌ Failed to run staging update for ${PACK_LABELS[1]} pack."
+    rm -rf "$BASELINE_DIR"
+    return 1
+  fi
+
+  # 7a. Copy the now-current update tool binary to the other two packs so
+  #     they don't independently self-update and race on the shared cache.
+  for i in 2 3; do
+    cp "${TARGET_DIRS[1]}/bin/${UPDATE_TOOL#./}" "${TARGET_DIRS[$i]}/bin/${UPDATE_TOOL#./}"
+    chmod +x "${TARGET_DIRS[$i]}/bin/${UPDATE_TOOL#./}"
+  done
+
+  # 8. Run the staging update for the remaining two packs in parallel.
+  echo "───────────────────────────────────"
+  echo "⏳ Streaming live output for the remaining packs (lines are prefixed by pack)..."
+
+  local LOG_DIR=$(mktemp -d)
+  local FAILED=0
+
+  for i in 2 3; do
+    local LABEL="${PACK_LABELS[$i]}"
+    local LOG_FILE="${LOG_DIR}/${LABEL}.staging.log"
+
+    {
+    (
+      _run_staging_update_tool "${TARGET_DIRS[$i]}"
+    ) 2>&1 | sed -l "s/^/[$(printf '%-3s' "$LABEL")] /" | tee "$LOG_FILE"
+    echo "${pipestatus[1]}" > "${LOG_FILE}.status"
+    } &
+  done
+
+  wait
+
+  for i in 2 3; do
+    local LABEL="${PACK_LABELS[$i]}"
+    local STATUS=$(cat "${LOG_DIR}/${LABEL}.staging.log.status" 2>/dev/null)
+
+    if [[ "$STATUS" == "0" ]]; then
+      echo "✅ ${LABEL} pack staged successfully."
+    else
+      echo "❌ Failed to run staging update for ${LABEL} pack."
+      FAILED=1
+    fi
+  done
+
+  rm -rf "$LOG_DIR"
+
+  if [[ $FAILED -ne 0 ]]; then
+    rm -rf "$BASELINE_DIR"
+    return 1
+  fi
+
+  # 9. Diff the snapshotted files against their post-staging-update contents,
+  #    per component.
+  echo "───────────────────────────────────"
+  echo "🔎 Checking manually tracked files for changes across acp/tm/gw..."
+  for f in "${FILES[@]}"; do
+    for i in {1..3}; do
+      local LABEL="${PACK_LABELS[$i]}"
+      if git --no-pager diff --no-index --color=always -- "${BASELINE_DIR}/${LABEL}/${f}" "${TARGET_DIRS[$i]}/${f}" > /dev/null; then
+        echo "✅ [$LABEL] unchanged: $f"
+      else
+        echo "⚠️  [$LABEL] changed: $f"
+        git --no-pager diff --no-index --color=always -- "${BASELINE_DIR}/${LABEL}/${f}" "${TARGET_DIRS[$i]}/${f}"
+      fi
+    done
+  done
+
+  rm -rf "$BASELINE_DIR"
+}

@@ -1,0 +1,94 @@
+originalPack() {
+  # --- 1. Validation & Constants ---
+  if [[ -z "$1" ]]; then
+    echo "Error: No version number supplied."
+    echo "Usage:   originalPack <version>"
+    echo "Example: originalPack 4.6.0"
+    return 1
+  fi
+
+  local VERSION="$1"
+  local MIN_ARM64_VERSION="4.6.0"
+  
+  # Use environment variables if set, otherwise fallback to defaults
+  local ORIGINAL_PACKS_DIR="${APIM_ORIGINAL_DIR:-/Users/dineth/Code/APIM-packs-original}"
+  local PATCH_PACKS_DIR="${APIM_PATCHES_DIR:-/Users/dineth/Code/APIM-packs-patches}"
+  local EMAIL="${APIM_EMAIL:-dinethh@wso2.com}"
+  
+  local PACK_NAME="wso2am-${VERSION}"
+  local ZIP_FILE="${PACK_NAME}.zip"
+  local SOURCE_ZIP_PATH="${ORIGINAL_PACKS_DIR}/${ZIP_FILE}"
+  local DEST_ZIP_PATH="${PATCH_PACKS_DIR}/${ZIP_FILE}"
+
+  # --- 2. Logic for Update Tool ---
+  local UPDATE_TOOL="./wso2update_darwin"
+  local NEEDS_SETUP=false
+
+  # Version comparison using sort -V
+  if [[ "$(printf '%s\n%s' "$MIN_ARM64_VERSION" "$VERSION" | sort -V | head -n 1)" == "$MIN_ARM64_VERSION" ]]; then
+    UPDATE_TOOL="./wso2update_darwin_arm64"
+    NEEDS_SETUP=true
+    echo "• Architecture: ARM64 detected for version $VERSION."
+  fi
+
+  # --- 3. Pre-flight Checks ---
+  if [[ ! -f "$SOURCE_ZIP_PATH" ]]; then
+    echo "Error: Source file not found: $SOURCE_ZIP_PATH"
+    return 1
+  fi
+
+  if [[ ! -d "$PATCH_PACKS_DIR" ]]; then
+    echo "Creating destination directory: $PATCH_PACKS_DIR"
+    mkdir -p "$PATCH_PACKS_DIR" || return 1
+  fi
+
+  # --- 4. Execution ---
+  echo "• Preparing pack in $PATCH_PACKS_DIR..."
+  
+  # Copy and track success
+  cp "$SOURCE_ZIP_PATH" "$DEST_ZIP_PATH" || { echo "Failed to copy zip"; return 1; }
+
+  # Cleanup old dir safely
+  if [[ -d "${PATCH_PACKS_DIR}/${PACK_NAME}" ]]; then
+    rm -rf "${PATCH_PACKS_DIR:?}/${PACK_NAME}" # :? prevents rm -rf / if variable is empty
+  fi
+
+  # Unzip
+  unzip -q "$DEST_ZIP_PATH" -d "$PATCH_PACKS_DIR" || { echo "Unzip failed"; return 1; }
+
+  # Enter bin directory
+  local BIN_DIR="${PATCH_PACKS_DIR}/${PACK_NAME}/bin"
+  if [[ -d "$BIN_DIR" ]]; then
+    cd "$BIN_DIR" || return 1
+    echo "• Entered $(pwd)"
+
+    # Handle Setup Script
+    if [[ "$NEEDS_SETUP" = true ]]; then
+      if [[ -f "./update_tool_setup.sh" ]]; then
+        echo "• Running ARM64 setup..."
+        sh "./update_tool_setup.sh"
+      else
+        echo "Warning: update_tool_setup.sh missing. Tool might fail."
+      fi
+    fi
+
+    # Run Update Tool
+    if [[ -f "$UPDATE_TOOL" ]]; then
+      echo "• Launching $UPDATE_TOOL..."
+      chmod +x "$UPDATE_TOOL" # Ensure it is executable
+      $UPDATE_TOOL -u $EMAIL
+
+      # Ensure function ends in the new pack's bin directory
+      cd "$BIN_DIR" || {
+        echo "Error: Failed to cd into $BIN_DIR"
+        return 1
+      }
+    else
+      echo "Error: Update tool '$UPDATE_TOOL' not found in bin directory."
+      return 1
+    fi
+  else
+    echo "Error: Bin directory not found at $BIN_DIR"
+    return 1
+  fi
+}

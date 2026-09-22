@@ -1,0 +1,142 @@
+# ~/.zsh/functions/configureIS7
+# NOTE: do not use `set -e` / `setopt err_exit` in here. This function is
+# autoloaded into the interactive shell (see fpath/autoload in .zshrc), so
+# errexit doesn't just abort the function on a failing command — it exits
+# the whole shell process, which kills the terminal. Check each risky
+# command explicitly with `|| return 1` instead.
+configureIS7() {
+
+  # --- Argument Validation ---
+  if [ -z "$1" ] || [ -z "$2" ]; then
+    echo "❌ Error: Missing required arguments." >&2
+    echo "   Usage: configureIS7 <is_version> <am_version>" >&2
+    echo "   Example: configureIS7 7.1.0 4.3.0" >&2
+    return 1
+  fi
+  local is_version="$1"
+  local am_version="$2"
+
+  # --- Configuration ---
+  local base_dir="/Users/dineth/Code/APIM-packs-patches"
+  local is_product_dir="${base_dir}/wso2is-${is_version}"
+  local cert_filename="wso2carbon.cer"
+  local cert_password="wso2carbon"
+
+  # Determine JAR version based on IS version
+  local jar_version
+  case "$is_version" in
+    7.2.0) jar_version="2.1.3" ;;
+    *)     jar_version="2.0.5" ;;
+  esac
+
+  local TOML_FILE="${is_product_dir}/repository/conf/deployment.toml"
+  local JAR_SOURCE="/Users/dineth/Code/is-km-stuff/wso2is.notification.event.handlers-${jar_version}.jar"
+  local JAR_DESTINATION="${is_product_dir}/repository/components/dropins/"
+
+  local am_product_dir="${base_dir}/wso2am-${am_version}"
+
+  # Define the full paths to the security directories
+  local is_sec_dir="${is_product_dir}/repository/resources/security"
+  local am_sec_dir="${am_product_dir}/repository/resources/security"
+
+  # --- Pre-flight Checks ---
+  echo "🔎 Verifying that product directories exist..."
+  if [ ! -d "$is_sec_dir" ]; then
+    echo "❌ Error: Identity Server security directory not found at: ${is_sec_dir}" >&2
+    return 1
+  fi
+  if [ ! -d "$am_sec_dir" ]; then
+    echo "❌ Error: API Manager security directory not found at: ${am_sec_dir}" >&2
+    return 1
+  fi
+  echo "✅ Directories verified."
+
+  # === NEW CHECK for JAR file ===
+  if [ ! -f "$JAR_SOURCE" ]; then
+    echo "❌ Error: Source JAR file not found: $JAR_SOURCE" >&2
+    return 1
+  fi
+  # ==============================
+
+  printf "\n⚙️ Starting IS Configuration and Certificate Exchange...\n"
+
+  # === NEW Configuration Steps (Moved from freshISPack) ===
+  # 1. Append configurations to deployment.toml using a heredoc
+  # Guard against re-running against an already-configured pack, which would
+  # otherwise duplicate this block on every run.
+  if grep -q "Custom Configurations Added by freshISPack script" "$TOML_FILE" 2>/dev/null; then
+    echo "⏭️  Skipping deployment.toml append (custom config block already present)."
+  else
+    echo "Appending configurations to ${TOML_FILE}..."
+    cat <<'EOF' >> "$TOML_FILE" || { echo "❌ Error: Failed to write to ${TOML_FILE}" >&2; return 1; }
+
+# === Custom Configurations Added by freshISPack script ===
+[oauth]
+authorize_all_scopes = true
+
+[[resource.access_control]]
+context="(.*)/scim2/Me"
+secure=true
+http_method="GET"
+cross_tenant=true
+permissions=[]
+scopes=[]
+
+[[event_listener]]
+id = "token_revocation"
+type = "org.wso2.carbon.identity.core.handler.AbstractIdentityHandler"
+name = "org.wso2.is.notification.ApimOauthEventInterceptor"
+order = 1
+[event_listener.properties]
+notification_endpoint = "https://localhost:9443/internal/data/v1/notify"
+username = "${admin.username}"
+password = "${admin.password}"
+'header.X-WSO2-KEY-MANAGER' = "WSO2-IS"
+EOF
+  fi
+
+  # 2. Copy the event handler JAR to the dropins directory
+  echo "Copying event handler JAR to dropins..."
+  cp "$JAR_SOURCE" "$JAR_DESTINATION" || { echo "❌ Error: Failed to copy JAR to ${JAR_DESTINATION}" >&2; return 1; }
+  # =======================================================
+  
+  # --- Process Start ---
+  echo "\n🚀 Starting certificate exchange between IS ${is_version} and AM ${am_version}..."
+
+  # === Part 1: Trust IS Certificate in AM ===
+  echo "\n[Part 1/2] Configuring AM to trust IS..."
+
+  echo "  (1/3) Exporting public certificate from IS keystore (wso2carbon.p12)..."
+  keytool -export -keystore "${is_sec_dir}/wso2carbon.p12" -alias wso2carbon -file "${is_sec_dir}/${cert_filename}" -storepass "${cert_password}" \
+    || { echo "❌ Error: Failed to export IS certificate." >&2; return 1; }
+
+  echo "  (2/3) Importing IS certificate into AM truststore (client-truststore.jks)..."
+  # Drop any stale alias first so re-running against an already-configured pack
+  # doesn't fail with "Certificate not imported, alias <...> already exists".
+  keytool -delete -alias wso2is_cert -keystore "${am_sec_dir}/client-truststore.jks" -storepass "${cert_password}" 2>/dev/null
+  # Use -noprompt to automatically answer "yes" to the trust question.
+  keytool -import -alias wso2is_cert -file "${is_sec_dir}/${cert_filename}" -keystore "${am_sec_dir}/client-truststore.jks" -storepass "${cert_password}" -noprompt \
+    || { echo "❌ Error: Failed to import IS certificate into AM truststore." >&2; rm -f "${is_sec_dir}/${cert_filename}"; return 1; }
+
+  echo "  (3/3) Cleaning up temporary certificate file..."
+  rm "${is_sec_dir}/${cert_filename}" || echo "⚠️  Warning: Failed to remove temp file ${is_sec_dir}/${cert_filename}" >&2
+
+  # === Part 2: Trust AM Certificate in IS ===
+  echo "\n[Part 2/2] Configuring IS to trust AM..."
+
+  echo "  (1/3) Exporting public certificate from AM keystore (wso2carbon.jks)..."
+  keytool -export -keystore "${am_sec_dir}/wso2carbon.jks" -alias wso2carbon -file "${am_sec_dir}/${cert_filename}" -storepass "${cert_password}" \
+    || { echo "❌ Error: Failed to export AM certificate." >&2; return 1; }
+
+  echo "  (2/3) Importing AM certificate into IS truststore (client-truststore.p12)..."
+  # Drop any stale alias first so re-running against an already-configured pack
+  # doesn't fail with "Certificate not imported, alias <...> already exists".
+  keytool -delete -alias wso2am_cert -keystore "${is_sec_dir}/client-truststore.p12" -storepass "${cert_password}" 2>/dev/null
+  keytool -import -alias wso2am_cert -file "${am_sec_dir}/${cert_filename}" -keystore "${is_sec_dir}/client-truststore.p12" -storepass "${cert_password}" -noprompt \
+    || { echo "❌ Error: Failed to import AM certificate into IS truststore." >&2; rm -f "${am_sec_dir}/${cert_filename}"; return 1; }
+
+  echo "  (3/3) Cleaning up temporary certificate file..."
+  rm "${am_sec_dir}/${cert_filename}" || echo "⚠️  Warning: Failed to remove temp file ${am_sec_dir}/${cert_filename}" >&2
+
+  echo "\n🎉 Success! Certificate exchange complete."
+}

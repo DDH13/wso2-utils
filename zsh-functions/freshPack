@@ -1,0 +1,124 @@
+freshPack() {
+  local PATCH_PACKS_DIR="/Users/dineth/Code/APIM-packs-patches"
+  local MIN_ARM64_VERSION="4.6.0"
+  local VERSION="$1"
+
+  # 1. Validation
+  if [[ -z "$VERSION" ]]; then
+    echo "❌ Error: No version number supplied."
+    return 1
+  fi
+
+  local PACK_NAME="wso2am-${VERSION}"
+  local ZIP_FILE="${PATCH_PACKS_DIR}/${PACK_NAME}.zip"
+  local TARGET_DIR="${PATCH_PACKS_DIR}/${PACK_NAME}"
+  local EMAIL="${APIM_EMAIL:-dinethh@wso2.com}"
+
+  # 1a. Optional flags
+  local STAGING=0
+  local arg
+  for arg in "${@:2}"; do
+    case "$arg" in
+      --staging) STAGING=1 ;;
+    esac
+  done
+
+  if [[ ! -f "$ZIP_FILE" ]]; then
+    echo "❌ Error: Zip file not found: $ZIP_FILE"
+    return 1
+  fi
+
+  # --- NEW: Fetch Password Securely ---
+  local WSO2_PASS
+  if ! WSO2_PASS=$(security find-generic-password -a "$EMAIL" -s "wso2-update" -w 2>/dev/null); then
+    echo "❌ Error: Password not found in Keychain for $EMAIL."
+    echo "💡 Run this command once to save it: security add-generic-password -a \"$EMAIL\" -s \"wso2-update\" -w"
+    return 1
+  fi
+  # ------------------------------------
+
+  # 2. Determine Update Tool Binary
+  local UPDATE_TOOL
+  if [[ "$(printf '%s\n%s' "$MIN_ARM64_VERSION" "$VERSION" | sort -V | head -n1)" == "$MIN_ARM64_VERSION" ]]; then
+    UPDATE_TOOL="./wso2update_darwin_arm64"
+  else
+    UPDATE_TOOL="./wso2update_darwin"
+  fi
+
+  # 3. Execution Block
+  (
+    set -e
+    cd "$PATCH_PACKS_DIR"
+
+    if [[ -d "$PACK_NAME" ]]; then
+      echo "🧹 Cleaning up old directory..."
+      
+      # 1. Clear flags (macOS specific)
+      chflags -R nouchg "$PACK_NAME" 2>/dev/null || true
+      
+      # 2. Atomic Rename (This is the secret sauce)
+      # Moving the folder to a temp name first usually bypasses "Directory not empty" locks
+      local TEMP_TRASH=".old_${PACK_NAME}_$(date +%s)"
+      if mv "$PACK_NAME" "$TEMP_TRASH" 2>/dev/null; then
+        rm -rf "$TEMP_TRASH" & # Delete in background to save time
+      else
+        # If move fails, try the brute force rm
+        rm -rf "$PACK_NAME"
+      fi
+    fi
+
+    echo "📦 Unzipping $PACK_NAME..."
+    unzip -q "$ZIP_FILE"
+
+    cd "${TARGET_DIR}/bin"
+
+    # Some packs (e.g. arm64 builds) don't ship the update tool binary directly —
+    # it has to be fetched first.
+    if [[ ! -f "$UPDATE_TOOL" ]]; then
+      echo "⚙️  Update tool binary missing. Running update_tool_setup.sh..."
+      sh update_tool_setup.sh
+    fi
+
+    chmod +x "$UPDATE_TOOL"
+
+    # 4. Handle the "Self-Update" Edge Case
+    echo "🔄 Running update tool: $UPDATE_TOOL"
+    
+    # Run the tool and capture output to a temporary file
+    local TMP_LOG=$(mktemp)
+
+    # --- UPDATED: Pass the password flag ---
+    $UPDATE_TOOL -u "$EMAIL" -p "$WSO2_PASS" | tee "$TMP_LOG"
+    local UPDATE_EXIT=${pipestatus[1]}
+
+    # Check if the output suggests a self-update occurred
+    if grep -q "Please re-run the tool" "$TMP_LOG"; then
+      echo "⚡ Update tool updated itself. Running for the second time..."
+      # --- UPDATED: Pass the password flag ---
+      $UPDATE_TOOL -u "$EMAIL" -p "$WSO2_PASS"
+      UPDATE_EXIT=$?
+    fi
+
+    rm -f "$TMP_LOG"
+
+    if [[ $UPDATE_EXIT -eq 0 && "$STAGING" == "1" ]]; then
+      echo "🧪 Re-running against the TESTING update level (--staging)..."
+      export WSO2_UPDATES_UPDATE_LEVEL_STATE=TESTING
+      $UPDATE_TOOL -u "$EMAIL" -p "$WSO2_PASS"
+      UPDATE_EXIT=$?
+    fi
+
+    exit $UPDATE_EXIT
+  )
+
+  if [[ $? -eq 0 ]]; then
+    echo "✅ Success! $VERSION is updated and ready."
+    cd "${TARGET_DIR}/bin" || {
+      echo "❌ Failed to cd into ${TARGET_DIR}/bin"
+      return 1
+    }
+  else
+    echo "❌ Failed to complete the update process."
+    return 1
+  fi
+}

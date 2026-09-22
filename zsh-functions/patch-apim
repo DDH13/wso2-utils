@@ -1,0 +1,102 @@
+patch-apim() {
+    local DIRECT_REPLACE=false
+    local OPTIND
+
+    while getopts "t" opt; do
+        case "$opt" in
+            t) DIRECT_REPLACE=true ;;
+            *) echo "Usage: patch-apim [-t] <version> <file1> <file2>..."; return 1 ;;
+        esac
+    done
+    shift $((OPTIND-1))
+
+    if [[ "$#" -lt 2 ]]; then
+        echo "Usage: patch-apim [-t] <version> <file1> <file2>..."
+        return 1
+    fi
+
+    local VERSION=$1
+    shift 
+    local BASE_PATH="/Users/dineth/Code/APIM-packs-patches/wso2am-$VERSION"
+    
+    if [[ ! -d "$BASE_PATH" ]]; then
+        echo "Error: APIM pack directory not found at $BASE_PATH"
+        return 1
+    fi
+
+    local DROPINS_DIR="$BASE_PATH/repository/components/dropins"
+    local PLUGINS_DIR="$BASE_PATH/repository/components/plugins"
+    local WEBAPP_DIR="$BASE_PATH/repository/deployment/server/webapps"
+
+    for FILE_PATH in "$@"; do
+        if [[ ! -f "$FILE_PATH" ]]; then
+            echo "Error: File not found -> $FILE_PATH"
+            continue
+        fi
+
+        local RAW_FILENAME=$(basename "$FILE_PATH")
+        local EXTENSION="${RAW_FILENAME##*.}"
+
+        case "$EXTENSION" in
+            jar)
+                # 1. Identify the Symbolic Name
+                local SYMBOLIC_NAME=$(echo "$RAW_FILENAME" | sed 's/[-_][0-9].*//')
+                local OLD_PLUGIN=$(find "$PLUGINS_DIR" -maxdepth 1 -name "${SYMBOLIC_NAME}_*.jar" | head -n 1)
+
+                if [[ "$DIRECT_REPLACE" == true ]]; then
+                    if [[ -n "$OLD_PLUGIN" ]]; then
+                        local TARGET_NAME=$(basename "$OLD_PLUGIN")
+                        
+                        # --- Improved Version Match Check ---
+                        # This extracts ONLY the numeric part (e.g., 9.32.147.61) 
+                        # by looking for the first digit after a separator.
+                        local SRC_VERSION=$(echo "$RAW_FILENAME" | grep -oE "[0-9]+\.[0-9].*" | sed 's/\.jar//')
+                        local TARGET_VERSION=$(echo "$TARGET_NAME" | grep -oE "[0-9]+\.[0-9].*" | sed 's/\.jar//')
+
+                        if [[ "$SRC_VERSION" != "$TARGET_VERSION" ]]; then
+                            echo "⚠️  VERSION MISMATCH WARNING:"
+                            echo "   Current in plugins: $TARGET_VERSION"
+                            echo "   Your patch file:    $SRC_VERSION"
+                        fi
+                        # ------------------------------------
+
+                        echo "🔄 Direct Replacing: $TARGET_NAME"
+                        rm "$OLD_PLUGIN"
+                        cp "$FILE_PATH" "$PLUGINS_DIR/$TARGET_NAME"
+                        echo "✅ JAR replaced in plugins: $TARGET_NAME"
+                    else
+                        echo "❌ Error: Could not find matching JAR in plugins for $SYMBOLIC_NAME"
+                    fi
+                else
+                    # Standard behavior
+                    if [[ -n "$OLD_PLUGIN" ]]; then
+                        echo "   🗑️  Removing from plugins: $(basename "$OLD_PLUGIN")"
+                        rm "$OLD_PLUGIN"
+                    fi
+                    
+                    mkdir -p "$DROPINS_DIR"
+                    local DESTINATION="$DROPINS_DIR/$RAW_FILENAME"
+                    [[ -f "$DESTINATION" ]] && rm "$DESTINATION"
+                    cp "$FILE_PATH" "$DESTINATION"
+                    echo "✅ JAR added to dropins: $RAW_FILENAME"
+                fi
+                ;;
+
+            war)
+                local DESTINATION="$WEBAPP_DIR/$RAW_FILENAME"
+                local UNZIPPED_DIR="${DESTINATION%.war}"
+                [[ -f "$DESTINATION" ]] && rm "$DESTINATION"
+                [[ -d "$UNZIPPED_DIR" ]] && rm -rf "$UNZIPPED_DIR"
+                cp "$FILE_PATH" "$DESTINATION"
+                echo "✅ WAR deployed: $RAW_FILENAME"
+                ;;
+
+            *)
+                echo "⚠️  Skipping: $RAW_FILENAME"
+                ;;
+        esac
+    done
+
+    echo "---"
+    echo "Processing complete for wso2am-$VERSION"
+}

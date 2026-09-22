@@ -1,0 +1,60 @@
+switch-apictl() {
+  if [[ -z "$1" ]]; then
+    echo "Usage: switch-apictl <version>"
+    echo "Example: switch-apictl 4.2"
+    return 1
+  fi
+
+  local version="$1"
+  local code_dir="/Users/dineth/Code"
+  local apictls_dir="$code_dir/apictls"
+  local target_dir="$code_dir/apictl"
+
+  # Use Zsh globbing with (N) so it returns an empty array instead of failing if no match is found
+  local tarballs=("$apictls_dir"/apictl-${version}*.tar.gz(N))
+
+  if [[ ${#tarballs[@]} -eq 0 ]]; then
+    echo "Error: No apictl tarball matching '$version' found in $apictls_dir"
+    return 1
+  elif [[ ${#tarballs[@]} -gt 1 ]]; then
+    echo "Warning: Multiple matches found for '$version'. Proceeding with ${tarballs[1]:t}"
+  fi
+
+  local archive="${tarballs[1]}"
+  
+  echo "Switching to: ${archive:t}..."
+
+  # 1. Delete the existing apictl folder inside the Code directory
+  if [[ -d "$target_dir" ]]; then
+    rm -rf "$target_dir"
+  fi
+
+  # 2. Extract into a temporary directory
+  local tmp_dir=$(mktemp -d)
+  tar -xzf "$archive" -C "$tmp_dir"
+
+  # Find the extracted root directory inside the temp folder using Zsh directory globbing (/)
+  local extracted_dirs=("$tmp_dir"/*(N-/))
+
+  if [[ ${#extracted_dirs[@]} -eq 0 ]]; then
+    echo "Error: Extraction failed or no directory found in the archive."
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  # 3. Move the extracted directory into Code as 'apictl'
+  mv "${extracted_dirs[1]}" "$target_dir"
+
+  # Clean up the temp directory
+  rm -rf "$tmp_dir"
+
+  echo "Successfully switched apictl!"
+
+  # 4. Automatically log in to the dev environment
+  echo "Logging into dev environment..."
+  
+  apictl login dev -u admin -p admin -k
+
+  # Note: Ensure the newly switched 'apictl' binary is in your $PATH.
+  # If it is not globally in your path, replace 'apictl' above with '"$target_dir/apictl"'
+}

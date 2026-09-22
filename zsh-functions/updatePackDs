@@ -1,0 +1,44 @@
+# Function to update and re-pack the WSO2 APIM Distributed Setup packs (acp, tm, gw)
+# Usage: updatePackDs <version>
+# Example: updatePackDs 4.7.0
+updatePackDs() {
+  # 1. Validate that a version number was provided as an argument
+  if [ -z "$1" ]; then
+    echo "Error: No version number supplied."
+    echo "Usage: updatePackDs <version>"
+    echo "Example: updatePackDs 4.7.0"
+    return 1
+  fi
+
+  # 2. Define variables needed for this function's scope
+  local DS_PATCH_PACKS_DIR="/Users/dineth/Code/APIM-packs-patches/Distributed-Setup"
+  local VERSION="$1"
+  local VERSION_DIR="${VERSION%.*}"
+  local VERSION_PACKS_DIR="${DS_PATCH_PACKS_DIR}/${VERSION_DIR}"
+  local PACK_NAMES=("wso2am-acp-${VERSION}" "wso2am-tm-${VERSION}" "wso2am-universal-gw-${VERSION}")
+
+  # 3. Call freshPackDs to handle unpacking and running the update tool on all three packs
+  freshPackDs "$VERSION"
+
+  # 4. Check the exit status of freshPackDs. A status of 0 means success.
+  if [ $? -eq 0 ]; then
+    # 5. Navigate back to the version's packs directory to proceed with re-packing
+    echo "Returning to ${VERSION_PACKS_DIR} to re-zip the packs."
+    cd "$VERSION_PACKS_DIR" || { echo "Failed to return to base directory: $VERSION_PACKS_DIR"; return 1; }
+
+    # 6. Delete the original zip and re-zip the updated directory, for each pack
+    local PACK_NAME
+    for PACK_NAME in "${PACK_NAMES[@]}"; do
+      echo "Deleting original zip file: ${PACK_NAME}.zip"
+      rm "${PACK_NAME}.zip"
+
+      echo "Zipping the updated directory: ${PACK_NAME}"
+      zip -r -q "${PACK_NAME}.zip" "${PACK_NAME}"
+    done
+
+    echo "Successfully updated and re-zipped all packs (acp, tm, gw) for ${VERSION}."
+  else
+    echo "Error: freshPackDs function failed. Aborting updatePackDs."
+    return 1
+  fi
+}

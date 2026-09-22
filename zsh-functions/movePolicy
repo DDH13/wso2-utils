@@ -1,0 +1,42 @@
+movePolicy() {
+    # Parse -s flag
+    local support_mode=false
+    if [ "$1" = "-s" ]; then
+        support_mode=true
+        shift
+    fi
+
+    # Check if a folder name was provided
+    if [ -z "$1" ]; then
+        echo "Error: Please provide a folder name."
+        return 1
+    fi
+
+    local folder="$1"
+    local dest_dir
+    if [ "$support_mode" = true ]; then
+        dest_dir="/Users/dineth/Code/wso2-support/support-api-platform/gateway/dev-policies/$folder"
+    else
+        dest_dir="/Users/dineth/Code/api-platform/gateway/dev-policies/$folder"
+    fi
+    local src_dir="/Users/dineth/Code/gateway-controllers/policies/$folder"
+
+    # Verify the source directory actually exists before doing anything
+    if [ ! -d "$src_dir" ]; then
+        echo "Error: Source directory '$src_dir' does not exist."
+        return 1
+    fi
+
+    # Ensure the destination directory exists (creates it if it was deleted or never existed)
+    mkdir -p "$dest_dir"
+
+    # 1. Clean out the destination folder safely
+    echo "Clearing files from $dest_dir..."
+    rm -rf "${dest_dir:?}"/*
+
+    # 2. Copy files from source to destination
+    echo "Copying files from $src_dir..."
+    cp -R "$src_dir"/* "$dest_dir/"
+
+    echo "Success! Policies updated for '$folder'."
+}

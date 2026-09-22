@@ -1,0 +1,43 @@
+# Function to update and re-pack a WSO2 APIM pack
+# Usage: updatePack <version>
+# Example: updatePack 4.2
+updatePack() {
+  # 1. Validate that a version number was provided as an argument
+  if [ -z "$1" ]; then
+    echo "Error: No version number supplied."
+    echo "Usage: updatePack <version>"
+    echo "Example: updatePack 4.2"
+    return 1
+  fi
+
+  # 2. Define variables needed for this function's scope
+  local PACKS_DIR="/Users/dineth/Code/APIM-packs-patches"
+  local VERSION=$1
+  local PACK_NAME="wso2am-${VERSION}"
+  local ZIP_FILE="${PACK_NAME}.zip"
+
+  # 3. Call freshPack to handle unpacking and running the update tool
+  # The 'source' command is not strictly necessary for functions in the same script,
+  # but it's good practice for clarity. We can call it directly.
+  freshPack "$VERSION"
+
+  # 4. Check the exit status of freshPack. A status of 0 means success.
+  if [ $? -eq 0 ]; then
+    # 5. Navigate back to the main packs directory to proceed with re-packing
+    echo "Returning to ${PACKS_DIR} to re-zip the pack."
+    cd "$PACKS_DIR" || { echo "Failed to return to base directory: $PACKS_DIR"; return 1; }
+
+    # 6. Delete the original zip file
+    echo "Deleting original zip file: ${ZIP_FILE}"
+    rm "$ZIP_FILE"
+
+    # 7. Zip the updated directory, -r for recursive, -q for quiet
+    echo "Zipping the updated directory: ${PACK_NAME}"
+    zip -r -q "${PACK_NAME}.zip" "${PACK_NAME}"
+
+    echo "Successfully updated and re-zipped ${PACK_NAME}."
+  else
+    echo "Error: freshPack function failed. Aborting updatePack."
+    return 1
+  fi
+}

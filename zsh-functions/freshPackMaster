@@ -1,0 +1,60 @@
+#!/bin/bash
+
+# A function to find a specific build, move it to the patches directory,
+# and unzip it for use.
+
+freshPackMaster() {
+  # 1. Define configuration variables
+  local SOURCE_DIR="/Users/dineth/Code/product-apim/all-in-one-apim/modules/distribution/product/target" 
+  local DEST_DIR="/Users/dineth/Code/APIM-packs-patches" 
+  local ZIP_FILE="wso2am-4.7.0-SNAPSHOT.zip" # Hardcoded filename as requested
+
+  # Calculate full paths and derived names
+  local SOURCE_ZIP_PATH="${SOURCE_DIR}/${ZIP_FILE}"
+  local DEST_ZIP_PATH="${DEST_DIR}/${ZIP_FILE}"
+  local PACK_NAME=${ZIP_FILE%.zip} #
+
+  echo "Searching for pack ${SOURCE_ZIP_PATH}"
+
+  # 2. Validate that the source file exists before proceeding
+  if [ ! -f "$SOURCE_ZIP_PATH" ]; then
+    echo "Error: Required file not found at: ${SOURCE_ZIP_PATH}"
+    return 1
+  fi
+
+  echo "Found pack.Preparing to copy to ${DEST_DIR}."
+
+  # 3. Navigate to the destination directory
+  cd "$DEST_DIR" || { echo "Error: Destination directory not found: $DEST_DIR"; return 1; } #
+
+  # 4. Copy the zip file from source to destination
+  echo "Copying ${ZIP_FILE}..."
+  cp "$SOURCE_ZIP_PATH" "$DEST_ZIP_PATH" #
+  if [ $? -ne 0 ]; then
+    echo "Error: Failed to copy file."
+    return 1
+  fi
+
+  # 5. If an old unzipped directory exists, remove it for a clean extraction
+  if [ -d "$PACK_NAME" ]; then #
+    echo "Removing existing directory: ${PACK_NAME}"
+    rm -rf "$PACK_NAME" #
+  fi
+
+  # 6. Unzip the pack quietly
+  echo "Unzipping ${ZIP_FILE}..."
+  unzip -q "$DEST_ZIP_PATH" #
+  if [ $? -ne 0 ]; then
+    echo "Error: Failed to unzip file. Check file integrity or permissions."
+    return 1
+  fi
+
+  echo "Success! Pack ${PACK_NAME} is ready in ${DEST_DIR}."
+
+  # cd into bin directory of the unzipped pack
+  cd "${PACK_NAME}/bin" || { echo "Error: Unable to navigate to bin directory."; return 1; } #
+  echo "Current directory: $(pwd)"
+}
+
+# Example usage:
+# freshPackMaster

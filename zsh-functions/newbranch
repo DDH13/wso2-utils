@@ -1,0 +1,80 @@
+newbranch() {
+  local FORCE_CHECKOUT=0
+  local ISSUE_NUMBER
+  local BRANCH_NUMBER
+
+  # 1. Parse flags
+  if [ "$1" = "-f" ]; then
+    FORCE_CHECKOUT=1
+    shift
+  fi
+
+  # 2. Validation
+  if [ $# -ne 2 ]; then
+    echo "Usage: newbranch [-f] <issue_number> <branch_number>"
+    return 1
+  fi
+
+  ISSUE_NUMBER="$1"
+  BRANCH_NUMBER="$2"
+  local UPSTREAM_TRACKING_BRANCH="upstream/support-$BRANCH_NUMBER.x-full"
+  local NEW_BRANCH_NAME="support-$BRANCH_NUMBER.x-full.$ISSUE_NUMBER"
+
+  echo "Fetching from upstream..."
+  git fetch upstream support-$BRANCH_NUMBER.x-full
+
+  # 3. Check if upstream branch exists
+  if ! git rev-parse --verify "$UPSTREAM_TRACKING_BRANCH" >/dev/null 2>&1; then
+    echo "❌ Error: Remote branch '$UPSTREAM_TRACKING_BRANCH' not found."
+    return 1
+  fi
+
+  # 4. Execute checkout with logic for -f
+  if [ "$FORCE_CHECKOUT" -eq 1 ]; then
+    # -B forces the branch creation even if it exists
+    # -f forces the checkout even if local changes exist
+    git checkout -f -B "$NEW_BRANCH_NAME" "$UPSTREAM_TRACKING_BRANCH"
+  else
+    git checkout -b "$NEW_BRANCH_NAME" "$UPSTREAM_TRACKING_BRANCH"
+  fi
+
+  if [ $? -eq 0 ]; then
+    echo "✅ Successfully switched to $NEW_BRANCH_NAME"
+  else
+    echo "❌ Error: Failed to create or checkout branch."
+    return 1
+  fi
+}
+
+# Autocomplete function for newbranch
+_newbranch_completion() {
+  local state
+
+  # _arguments handles both flags and positional arguments intelligently
+  _arguments \
+    '(-f)-f[Force checkout even if local changes exist]' \
+    '1:issue_number:' \
+    '2:branch_number:->branches'
+
+  # If Zsh determines the user is typing the second positional argument (the branch number)
+  if [[ "$state" == branches ]]; then
+    local -a branch_list
+    
+    # Format is "completion_value:Description"
+    branch_list=(
+      '9.20.74:APIM 4.1.0 (support-9.20.74.x-full)'
+      '9.28.116:APIM 4.2.0 (support-9.28.116.x-full)'
+      '9.29.120:APIM 4.3.0 (support-9.29.120.x-full)'
+      '9.30.67:APIM 4.4.0 (support-9.30.67.x-full)'
+      '9.31.86:APIM 4.5.0 (support-9.31.86.x-full)'
+      '9.32.147:APIM 4.6.0 (support-9.32.147.x-full)'
+      '9.33.122:APIM 4.7.0 (support-9.33.122.x-full)'
+    )
+    
+    # Tell Zsh to use this list for descriptions
+    _describe 'WSO2 APIM Branches' branch_list
+  fi
+}
+
+# Bind the autocomplete function to your actual script command
+compdef _newbranch_completion newbranch

@@ -1,0 +1,280 @@
+freshPackDs() {
+  local DS_PATCH_PACKS_DIR="/Users/dineth/Code/APIM-packs-patches/Distributed-Setup"
+  local MIN_ARM64_VERSION="4.6.0"
+  local VERSION="$1"
+
+  # 1. Validation
+  if [[ -z "$VERSION" ]]; then
+    echo "❌ Error: No version number supplied."
+    return 1
+  fi
+
+  local VERSION_DIR="${VERSION%.*}"
+  local VERSION_PACKS_DIR="${DS_PATCH_PACKS_DIR}/${VERSION_DIR}"
+
+  if [[ ! -d "$VERSION_PACKS_DIR" ]]; then
+    echo "❌ Error: Version folder not found: $VERSION_PACKS_DIR"
+    return 1
+  fi
+
+  # 1a. Optional flags
+  local STAGING=0
+  local PREP=0
+  local arg
+  for arg in "${@:2}"; do
+    case "$arg" in
+      --staging) STAGING=1 ;;
+      --prep) PREP=1 ;;
+    esac
+  done
+
+  local EMAIL="${APIM_EMAIL:-dinethh@wso2.com}"
+
+  # --- Fetch Password Securely ---
+  local WSO2_PASS
+  if ! WSO2_PASS=$(security find-generic-password -a "$EMAIL" -s "wso2-update" -w 2>/dev/null); then
+    echo "❌ Error: Password not found in Keychain for $EMAIL."
+    echo "💡 Run this command once to save it: security add-generic-password -a \"$EMAIL\" -s \"wso2-update\" -w"
+    return 1
+  fi
+  # --------------------------------
+
+  # 2. Determine Update Tool Binary
+  local UPDATE_TOOL
+  if [[ "$(printf '%s\n%s' "$MIN_ARM64_VERSION" "$VERSION" | sort -V | head -n1)" == "$MIN_ARM64_VERSION" ]]; then
+    UPDATE_TOOL="./wso2update_darwin_arm64"
+  else
+    UPDATE_TOOL="./wso2update_darwin"
+  fi
+
+  # 2a. Runs the update tool against a pack's bin dir, handling the tool's
+  #     own self-update. When --staging was passed, and the update succeeded,
+  #     it re-runs once more against the TESTING update level.
+  _run_update_tool() {
+    local target_dir="$1"
+    cd "${target_dir}/bin" || exit 1
+
+    local TMP_LOG=$(mktemp)
+    $UPDATE_TOOL -u "$EMAIL" -p "$WSO2_PASS" | tee "$TMP_LOG"
+    local UPDATE_EXIT=${pipestatus[1]}
+
+    # Check if the output suggests a self-update occurred
+    if grep -q "Please re-run the tool" "$TMP_LOG"; then
+      echo "⚡ Update tool updated itself. Running for the second time..."
+      $UPDATE_TOOL -u "$EMAIL" -p "$WSO2_PASS"
+      UPDATE_EXIT=$?
+    fi
+
+    rm -f "$TMP_LOG"
+
+    if [[ $UPDATE_EXIT -eq 0 && "$STAGING" == "1" ]]; then
+      echo "🧪 Re-running against the TESTING update level (--staging)..."
+      export WSO2_UPDATES_UPDATE_LEVEL_STATE=TESTING
+      $UPDATE_TOOL -u "$EMAIL" -p "$WSO2_PASS"
+      UPDATE_EXIT=$?
+    fi
+
+    exit $UPDATE_EXIT
+  }
+
+  # 3. The three packs that make up the distributed setup
+  local PACK_LABELS=("acp" "tm" "gw")
+  local PACK_NAMES=("wso2am-acp-${VERSION}" "wso2am-tm-${VERSION}" "wso2am-universal-gw-${VERSION}")
+
+  # 3a. Validate all zips exist up front, before kicking off any background work
+  local i
+  for i in {1..3}; do
+    local ZIP_FILE="${VERSION_PACKS_DIR}/${PACK_NAMES[$i]}.zip"
+    if [[ ! -f "$ZIP_FILE" ]]; then
+      echo "❌ Error: Zip file not found: $ZIP_FILE"
+      return 1
+    fi
+  done
+
+  local LOG_DIR=$(mktemp -d)
+  local FAILED=0
+
+  # 4. Unzip + prep all three packs in parallel. This is pure local disk I/O
+  #    (cleanup, unzip, fetch the update tool binary if missing), so there's no
+  #    shared resource for the packs to contend over here.
+  for i in {1..3}; do
+    local LABEL="${PACK_LABELS[$i]}"
+    local PACK_NAME="${PACK_NAMES[$i]}"
+    local ZIP_FILE="${VERSION_PACKS_DIR}/${PACK_NAME}.zip"
+    local TARGET_DIR="${VERSION_PACKS_DIR}/${PACK_NAME}"
+    local LOG_FILE="${LOG_DIR}/${LABEL}.prep.log"
+
+    echo "▶️  Prepping ${LABEL} pack: ${PACK_NAME}"
+
+    {
+    (
+      set -e
+      cd "$VERSION_PACKS_DIR"
+
+      if [[ -d "$PACK_NAME" ]]; then
+        echo "🧹 Cleaning up old directory..."
+
+        # 1. Clear flags (macOS specific)
+        chflags -R nouchg "$PACK_NAME" 2>/dev/null || true
+
+        # 2. Atomic Rename (This is the secret sauce)
+        # Moving the folder to a temp name first usually bypasses "Directory not empty" locks
+        TEMP_TRASH=".old_${PACK_NAME}_$(date +%s)_$$"
+        if mv "$PACK_NAME" "$TEMP_TRASH" 2>/dev/null; then
+          rm -rf "$TEMP_TRASH" & # Delete in background to save time
+        else
+          # If move fails, try the brute force rm
+          rm -rf "$PACK_NAME"
+        fi
+      fi
+
+      echo "📦 Unzipping $PACK_NAME..."
+      unzip -q "$ZIP_FILE"
+
+      cd "${TARGET_DIR}/bin"
+
+      # Some packs (e.g. arm64 builds) don't ship the update tool binary directly —
+      # it has to be fetched first.
+      if [[ ! -f "$UPDATE_TOOL" ]]; then
+        echo "⚙️  Update tool binary missing. Running update_tool_setup.sh..."
+        sh update_tool_setup.sh
+      fi
+
+      chmod +x "$UPDATE_TOOL"
+    ) 2>&1 | sed -l "s/^/[$(printf '%-3s' "$LABEL")] /" | tee "$LOG_FILE"
+    echo "${pipestatus[1]}" > "${LOG_FILE}.status"
+    } &
+  done
+
+  wait
+
+  for i in {1..3}; do
+    local LABEL="${PACK_LABELS[$i]}"
+    local STATUS=$(cat "${LOG_DIR}/${LABEL}.prep.log.status" 2>/dev/null)
+    if [[ "$STATUS" != "0" ]]; then
+      echo "❌ Failed to prep ${LABEL} pack."
+      FAILED=1
+    fi
+  done
+
+  if [[ $FAILED -ne 0 ]]; then
+    rm -rf "$LOG_DIR"
+    return 1
+  fi
+
+  # 5. Run the update tool for the first pack alone, in the foreground.
+  #    wso2update's self-update writes to a machine-wide cache
+  #    (~/.wso2-updates/updates/client/...), so running all three packs' update
+  #    tools at once races on that shared file and can corrupt the downloaded
+  #    client zip for the others. Resolving it once, sequentially, first avoids
+  #    that entirely — after this, the tool is guaranteed current.
+  echo "───────────────────────────────────"
+  echo "🔄 Running update tool for ${PACK_LABELS[1]} first (resolves any tool self-update safely)..."
+
+  local LABEL="${PACK_LABELS[1]}"
+  local TARGET_DIR="${VERSION_PACKS_DIR}/${PACK_NAMES[1]}"
+
+  (
+    _run_update_tool "$TARGET_DIR"
+  )
+
+  if [[ $? -eq 0 ]]; then
+    echo "✅ ${LABEL} pack ($VERSION) updated successfully."
+  else
+    echo "❌ Failed to complete the update process for ${LABEL} pack."
+    FAILED=1
+  fi
+
+  if [[ $FAILED -ne 0 ]]; then
+    rm -rf "$LOG_DIR"
+    return 1
+  fi
+
+  # 5a. Each pack ships its own separate copy of the update tool binary, so
+  #     acp finishing its self-update does NOT make tm/gw current too. Letting
+  #     tm and gw each detect they're outdated and self-update independently
+  #     in step 6 races both of them on the same shared, machine-wide client
+  #     cache (~/.wso2-updates/updates/client/...) — one process's download
+  #     can get corrupted mid-write by the other (this is what broke tm).
+  #     Copying acp's now-current binary over theirs avoids triggering their
+  #     self-update at all.
+  for i in 2 3; do
+    local TARGET_DIR="${VERSION_PACKS_DIR}/${PACK_NAMES[$i]}"
+    cp "${VERSION_PACKS_DIR}/${PACK_NAMES[1]}/bin/${UPDATE_TOOL#./}" "${TARGET_DIR}/bin/${UPDATE_TOOL#./}"
+    chmod +x "${TARGET_DIR}/bin/${UPDATE_TOOL#./}"
+  done
+
+  # 6. Now that every pack has the current update tool binary, run the
+  #    remaining two packs' update tools in parallel and stream their output live.
+  echo "───────────────────────────────────"
+  echo "⏳ Streaming live output for the remaining packs (lines are prefixed by pack)..."
+
+  for i in 2 3; do
+    local LABEL="${PACK_LABELS[$i]}"
+    local TARGET_DIR="${VERSION_PACKS_DIR}/${PACK_NAMES[$i]}"
+    local LOG_FILE="${LOG_DIR}/${LABEL}.update.log"
+
+    {
+    (
+      _run_update_tool "$TARGET_DIR"
+    ) 2>&1 | sed -l "s/^/[$(printf '%-3s' "$LABEL")] /" | tee "$LOG_FILE"
+    echo "${pipestatus[1]}" > "${LOG_FILE}.status"
+    } &
+  done
+
+  wait
+
+  for i in 2 3; do
+    local LABEL="${PACK_LABELS[$i]}"
+    local STATUS=$(cat "${LOG_DIR}/${LABEL}.update.log.status" 2>/dev/null)
+
+    echo "───────────────────────────────────"
+    if [[ "$STATUS" == "0" ]]; then
+      echo "✅ ${LABEL} pack ($VERSION) updated successfully."
+    else
+      echo "❌ Failed to complete the update process for ${LABEL} pack."
+      FAILED=1
+    fi
+  done
+
+  rm -rf "$LOG_DIR"
+
+  if [[ $FAILED -ne 0 ]]; then
+    return 1
+  fi
+
+  echo "───────────────────────────────────"
+  echo "✅ Success! All packs (acp, tm, gw) for $VERSION are updated and ready."
+
+  # 7. Optionally stage the updated packs for the dev setup: strip the version
+  #    suffix off each pack's name and copy it into the components dir, which
+  #    is emptied first (aside from its tracked .gitkeep) so stale versions
+  #    from a previous run don't linger alongside the new ones.
+  if [[ $PREP -eq 1 ]]; then
+    echo "───────────────────────────────────"
+    local COMPONENTS_DIR="/Users/dineth/Code/apim-distributed-dev-setup/components"
+    echo "📁 Prepping components at ${COMPONENTS_DIR}..."
+
+    mkdir -p "$COMPONENTS_DIR"
+
+    local existing
+    for existing in "${COMPONENTS_DIR:?}"/*(DN); do
+      [[ "$(basename "$existing")" == ".gitkeep" ]] && continue
+      rm -rf "$existing"
+    done
+
+    for i in {1..3}; do
+      local PACK_NAME="${PACK_NAMES[$i]}"
+      local STRIPPED_NAME="${PACK_NAME%-${VERSION}}"
+      echo "📋 Copying ${PACK_NAME} -> ${COMPONENTS_DIR}/${STRIPPED_NAME}"
+      cp -R "${VERSION_PACKS_DIR}/${PACK_NAME}" "${COMPONENTS_DIR}/${STRIPPED_NAME}"
+    done
+
+    echo "✅ Components ready at ${COMPONENTS_DIR}"
+  fi
+
+  cd "$VERSION_PACKS_DIR" || {
+    echo "❌ Failed to cd into ${VERSION_PACKS_DIR}"
+    return 1
+  }
+}

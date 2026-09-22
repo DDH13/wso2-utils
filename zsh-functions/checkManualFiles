@@ -1,0 +1,129 @@
+checkManualFiles() {
+  local PATCH_PACKS_DIR="/Users/dineth/Code/APIM-packs-patches"
+  local MIN_ARM64_VERSION="4.6.0"
+  local VERSION="$1"
+
+  # 1. Validation
+  if [[ -z "$VERSION" ]]; then
+    echo "❌ Error: No version number supplied."
+    return 1
+  fi
+
+  local PACK_NAME="wso2am-${VERSION}"
+  local TARGET_DIR="${PATCH_PACKS_DIR}/${PACK_NAME}"
+  local EMAIL="${APIM_EMAIL:-dinethh@wso2.com}"
+
+  # 2. Run a normal freshPack first and wait for it to finish.
+  echo "🚀 Running freshPack for $VERSION..."
+  freshPack "$VERSION"
+  if [[ $? -ne 0 ]]; then
+    echo "❌ freshPack failed. Aborting."
+    return 1
+  fi
+
+  # 3. Prompt for manual file paths, one at a time, validating immediately.
+  echo "───────────────────────────────────"
+  echo "📝 Enter file paths (relative to the pack home), one per line."
+  echo "   e.g. repository/resources/conf/templates/repository/conf/carbon.xml.j2"
+  echo "   Press Enter on an empty line when done."
+
+  local -a FILES=()
+  local rel confirm
+  while true; do
+    while true; do
+      read -r "rel?  > "
+      [[ -z "$rel" ]] && break
+
+      if [[ -f "${TARGET_DIR}/${rel}" ]]; then
+        FILES+=("$rel")
+      else
+        echo "⚠️  Not found: ${TARGET_DIR}/${rel} — check the path and try again."
+      fi
+    done
+
+    if [[ ${#FILES[@]} -eq 0 ]]; then
+      echo "❌ Error: No file paths provided."
+      return 1
+    fi
+
+    echo "───────────────────────────────────"
+    echo "You entered ${#FILES[@]} file(s):"
+    local f
+    for f in "${FILES[@]}"; do
+      echo "  - $f"
+    done
+
+    read -r "confirm?Finished entering paths? Proceed to staging update? (y/n) "
+    if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
+      break
+    fi
+    echo "↩️  Continuing to accept more file paths..."
+  done
+
+  # 4. Snapshot the requested files before the staging update.
+  local BASELINE_DIR=$(mktemp -d)
+  local f
+  for f in "${FILES[@]}"; do
+    mkdir -p "$(dirname "${BASELINE_DIR}/${f}")"
+    cp "${TARGET_DIR}/${f}" "${BASELINE_DIR}/${f}"
+  done
+
+  # 5. Determine Update Tool Binary (same logic as freshPack)
+  local UPDATE_TOOL
+  if [[ "$(printf '%s\n%s' "$MIN_ARM64_VERSION" "$VERSION" | sort -V | head -n1)" == "$MIN_ARM64_VERSION" ]]; then
+    UPDATE_TOOL="./wso2update_darwin_arm64"
+  else
+    UPDATE_TOOL="./wso2update_darwin"
+  fi
+
+  # --- Fetch Password Securely ---
+  local WSO2_PASS
+  if ! WSO2_PASS=$(security find-generic-password -a "$EMAIL" -s "wso2-update" -w 2>/dev/null); then
+    echo "❌ Error: Password not found in Keychain for $EMAIL."
+    echo "💡 Run this command once to save it: security add-generic-password -a \"$EMAIL\" -s \"wso2-update\" -w"
+    rm -rf "$BASELINE_DIR"
+    return 1
+  fi
+  # --------------------------------
+
+  # 6. Run the update tool against the TESTING (staging) update level.
+  echo "🧪 Running update tool against the TESTING update level..."
+  (
+    set -e
+    cd "${TARGET_DIR}/bin"
+    export WSO2_UPDATES_UPDATE_LEVEL_STATE=TESTING
+
+    local TMP_LOG=$(mktemp)
+    $UPDATE_TOOL -u "$EMAIL" -p "$WSO2_PASS" | tee "$TMP_LOG"
+    local UPDATE_EXIT=${pipestatus[1]}
+
+    if grep -q "Please re-run the tool" "$TMP_LOG"; then
+      echo "⚡ Update tool updated itself. Running for the second time..."
+      $UPDATE_TOOL -u "$EMAIL" -p "$WSO2_PASS"
+      UPDATE_EXIT=$?
+    fi
+
+    rm -f "$TMP_LOG"
+    exit $UPDATE_EXIT
+  )
+
+  if [[ $? -ne 0 ]]; then
+    echo "❌ Failed to run the update tool against the TESTING update level."
+    rm -rf "$BASELINE_DIR"
+    return 1
+  fi
+
+  # 7. Diff the snapshotted files against their post-staging-update contents.
+  echo "───────────────────────────────────"
+  echo "🔎 Checking manually tracked files for changes..."
+  for f in "${FILES[@]}"; do
+    if git --no-pager diff --no-index --color=always -- "${BASELINE_DIR}/${f}" "${TARGET_DIR}/${f}" > /dev/null; then
+      echo "✅ unchanged: $f"
+    else
+      echo "⚠️  changed: $f"
+      git --no-pager diff --no-index --color=always -- "${BASELINE_DIR}/${f}" "${TARGET_DIR}/${f}"
+    fi
+  done
+
+  rm -rf "$BASELINE_DIR"
+}

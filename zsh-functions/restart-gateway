@@ -1,0 +1,93 @@
+restart-gateway() {
+  local GATEWAY_DIR="$HOME/Code/api-platform/gateway"
+  local HARD=false
+  local SKIP_TESTS=false
+  local -a PROFILES=()
+
+  # Parse flags
+  while (( $# > 0 )); do
+    case "$1" in
+      --hard) HARD=true ;;
+      --skip-tests) SKIP_TESTS=true ;;
+      -s) GATEWAY_DIR="$HOME/Code/wso2-support/support-api-platform/gateway" ;;
+      --profile)
+        shift
+        if [[ -z "${1:-}" ]]; then
+          echo "restart-gateway: --profile requires a value, e.g. tracing, logging, metrics" >&2
+          return 1
+        fi
+        PROFILES+=("$1")
+        ;;
+      *)
+        echo "restart-gateway: unknown flag '$1' (expected --hard, --skip-tests, -s, and/or --profile <name>, repeatable)" >&2
+        return 1
+        ;;
+    esac
+    shift
+  done
+
+  # Move to gateway dir only if needed
+  if [[ "$PWD" != "$GATEWAY_DIR" ]]; then
+    cd "$GATEWAY_DIR" || return 1
+  fi
+
+  # Extra observability stacks (tracing/logging/metrics — see docker-compose.yaml)
+  # live behind compose profiles. COMPOSE_PROFILES is honored uniformly by
+  # down/up/logs, so passing it once keeps them in sync within this run.
+  local PROFILES_CSV=""
+  (( ${#PROFILES[@]} > 0 )) && PROFILES_CSV="${(j:,:)PROFILES}"
+
+  # Mirrors the top-level `make build`, with two dev-only speedups on top —
+  # neither needs any change to the Makefiles themselves:
+  #  - gateway-builder doesn't depend on gateway-runtime (the runtime image
+  #    compiles its own copy of that binary from source), so it builds in the
+  #    background alongside gateway-runtime instead of after it. controller
+  #    still runs last — it depends on build-manifest.yaml + extracted
+  #    policies produced by the gateway-runtime build.
+  #  - GO_BUILD_PARALLELISM defaults to 2 in gateway-runtime/Makefile to
+  #    protect CI's multi-arch fan-out; bumped here since a local single-arch
+  #    build has room (override by exporting GO_BUILD_PARALLELISM yourself).
+  #  - With --skip-tests, `make -o test` treats the phony "test" prerequisite
+  #    as already up to date and skips it.
+  _gateway_build() {
+    local test_flag=()
+    $SKIP_TESTS && test_flag=(-o test)
+    local go_parallelism="${GO_BUILD_PARALLELISM:-6}"
+
+    make -C gateway-builder build &
+    local builder_pid=$!
+
+    make -C gateway-runtime build "${test_flag[@]}" GO_BUILD_PARALLELISM=$go_parallelism
+    local runtime_status=$?
+
+    wait $builder_pid
+    local builder_status=$?
+
+    if (( runtime_status != 0 || builder_status != 0 )); then
+      return 1
+    fi
+
+    make -C gateway-controller build "${test_flag[@]}"
+  }
+
+  if $HARD; then
+    COMPOSE_PROFILES="$PROFILES_CSV" docker compose down -v &&
+    ADMIN_USERNAME=admin ADMIN_PASSWORD=admin "$GATEWAY_DIR/scripts/setup.sh" --force &&
+    _gateway_build &&
+    COMPOSE_PROFILES="$PROFILES_CSV" docker compose up -d &&
+    COMPOSE_PROFILES="$PROFILES_CSV" docker compose logs -f
+  else
+    # docker compose requires api-platform.env as an env_file, and the router's
+    # HTTPS listener needs the cert/key — none of which exist until setup.sh has
+    # been run once. Provision them now so a fresh checkout doesn't just fail on
+    # `docker compose up`.
+    if [[ ! -f "$GATEWAY_DIR/api-platform.env" ]]; then
+      echo "==> No admin credentials found — running setup.sh to provision them"
+      ADMIN_USERNAME=admin ADMIN_PASSWORD=admin "$GATEWAY_DIR/scripts/setup.sh" || return 1
+    fi
+    COMPOSE_PROFILES="$PROFILES_CSV" docker compose down -v &&
+    COMPOSE_PROFILES="$PROFILES_CSV" docker compose up -d &&
+    COMPOSE_PROFILES="$PROFILES_CSV" docker compose logs -f
+  fi
+  unset -f _gateway_build
+}

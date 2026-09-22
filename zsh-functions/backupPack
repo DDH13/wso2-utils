@@ -1,0 +1,108 @@
+backupPack() {
+  local PATCH_PACKS_DIR="/Users/dineth/Code/APIM-packs-patches"
+  local BACKUPS_DIR="${PATCH_PACKS_DIR}/backups"
+  
+  # Ensure backups directory exists
+  mkdir -p "$BACKUPS_DIR"
+
+  # 1. Argument Parsing
+  local RESTORE_MODE=false
+  local BACKUP_NAME=""
+
+  if [[ "$1" == "-r" ]]; then
+    RESTORE_MODE=true
+    BACKUP_NAME="$2"
+  else
+    BACKUP_NAME="$1"
+  fi
+
+  # Validate that a backup name was actually provided
+  if [[ -z "$BACKUP_NAME" ]]; then
+    echo "❌ Error: Backup name not provided."
+    echo "Usage: backupPack <backup-name>"
+    echo "       backupPack -r <backup-name>"
+    return 1
+  fi
+
+  # 2. Context Extraction
+  local CURRENT_DIR="$PWD"
+  local PACK_DIR="$(dirname "$CURRENT_DIR")"
+  local PACK_NAME="$(basename "$PACK_DIR")"
+
+  # 3. Safeguard: Validate Directory Context
+  if [[ "$CURRENT_DIR" != "${PATCH_PACKS_DIR}/${PACK_NAME}/bin" || ! "$PACK_NAME" == wso2am-* ]]; then
+    echo "❌ Error: You must run this command from inside a pack's bin directory."
+    echo "Expected context: ${PATCH_PACKS_DIR}/wso2am-X.X.X/bin"
+    return 1
+  fi
+
+  local BACKUP_FILE="${BACKUPS_DIR}/${PACK_NAME}-${BACKUP_NAME}.zip"
+
+  # 4. Execution Block
+  if [[ "$RESTORE_MODE" == true ]]; then
+    # --- RESTORE LOGIC ---
+    if [[ ! -f "$BACKUP_FILE" ]]; then
+      echo "❌ Error: Backup not found -> ${PACK_NAME}-${BACKUP_NAME}.zip"
+      return 1
+    fi
+
+    echo "🔄 Restoring backup: $BACKUP_NAME for $PACK_NAME..."
+    
+    (
+      set -e
+      cd "$PATCH_PACKS_DIR"
+
+      # Atomic removal of the current pack
+      if [[ -d "$PACK_NAME" ]]; then
+        echo "🧹 Removing current $PACK_NAME pack..."
+        chflags -R nouchg "$PACK_NAME" 2>/dev/null || true
+        
+        local TEMP_TRASH=".old_${PACK_NAME}_$(date +%s)"
+        if mv "$PACK_NAME" "$TEMP_TRASH" 2>/dev/null; then
+          rm -rf "$TEMP_TRASH" & 
+        else
+          rm -rf "$PACK_NAME"
+        fi
+      fi
+
+      echo "📦 Unzipping backup..."
+      unzip -q "$BACKUP_FILE"
+    )
+
+    if [[ $? -eq 0 ]]; then
+      echo "✅ Success! Backup restored."
+      cd "${PATCH_PACKS_DIR}/${PACK_NAME}/bin" || return 1
+    else
+      echo "❌ Failed to restore the backup."
+      return 1
+    fi
+
+  else
+    # --- BACKUP LOGIC ---
+    # Safeguard: Prevent overwriting an existing backup
+    if [[ -f "$BACKUP_FILE" ]]; then
+      echo "❌ Error: A backup named '$BACKUP_NAME' already exists for $PACK_NAME."
+      echo "Please use a different name or manually delete the existing backup in the backups folder."
+      return 1
+    fi
+
+    echo "💾 Creating backup: $BACKUP_NAME for $PACK_NAME..."
+
+    (
+      set -e
+      cd "$PATCH_PACKS_DIR"
+      
+      # Added the '-y' flag to preserve symlinks and prevent "No such file" errors
+      zip -rqy "$BACKUP_FILE" "$PACK_NAME" -x "*.DS_Store"
+    )
+
+    if [[ $? -eq 0 ]]; then
+      echo "✅ Success! Backup saved to: ${PACK_NAME}-${BACKUP_NAME}.zip"
+    else
+      echo "❌ Failed to create backup. Cleaning up partial file..."
+      # Delete the corrupted zip file so the user can easily try again
+      rm -f "$BACKUP_FILE"
+      return 1
+    fi
+  fi
+}
