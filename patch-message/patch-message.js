@@ -72,7 +72,24 @@
             return `UI(${labels.join(', ')} portal)`;
         }
 
-        return rows.map(row => `${row.operation} ${row.file}`.trim()).join('\n');
+        // Group the remaining rows into "Modified:" / "Added:" / "Removed:"
+        // bullet lists, in that fixed order, skipping any that are empty.
+        const OPERATION_ORDER = ['Modified', 'Added', 'Removed'];
+        const byOperation = new Map();
+        rows.forEach(row => {
+            const op = row.operation || 'Other';
+            if (!byOperation.has(op)) byOperation.set(op, []);
+            byOperation.get(op).push(row.file);
+        });
+        const orderedOps = [
+            ...OPERATION_ORDER,
+            ...[...byOperation.keys()].filter(op => !OPERATION_ORDER.includes(op)),
+        ];
+
+        return orderedOps
+            .filter(op => byOperation.has(op))
+            .map(op => `${op}:\n${byOperation.get(op).map(file => `  - ${file}`).join('\n')}`)
+            .join('\n');
     }
 
     function getLifecycleStatus(doc) {
