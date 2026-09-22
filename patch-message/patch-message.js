@@ -76,9 +76,9 @@
     }
 
     function getLifecycleStatus(doc) {
-        // Staging build status / Manual testing aren't separate DOM fields -
-        // both are read off the current lifecycle badge (the last
-        // ".wum_badge" span right before the lifecycle-history button).
+        // Staging build status isn't a separate DOM field - it's read off
+        // the current lifecycle badge (the last ".wum_badge" span right
+        // before the lifecycle-history button).
         const anchor = doc.getElementById('btnShowLifecycleStateChangeLogModal');
         let el = anchor ? anchor.previousElementSibling : null;
         while (el && !el.classList.contains('wum_badge')) el = el.previousElementSibling;
@@ -138,7 +138,7 @@
         const status = getLifecycleStatus(doc);
         if (status) {
             lines.push(`Staging build status: ${status}`);
-            lines.push(`Manual Testing: ${status}`);
+            lines.push('Manual Testing: PENDING');
         }
 
         const components = getApplicableComponents(doc);
