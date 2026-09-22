@@ -40,9 +40,28 @@
         return [...doc.querySelectorAll('#compatibleProducts > div[name]')];
     }
 
-    const WEBAPP_LABELS = { publisher: 'Publisher', devportal: 'Developer', admin: 'Admin' };
+    function getSecurityAdvisories(doc) {
+        // No stable id on this panel - locate it by its heading text and
+        // read every row of its (single-column) table. The whole panel is
+        // omitted from the DOM entirely when the update isn't a security fix.
+        const heading = [...doc.querySelectorAll('h2')].find(h => h.textContent.trim() === 'Security Advisories');
+        const panel = heading ? heading.closest('.x_panel') : null;
+        if (!panel) return [];
+        return [...panel.querySelectorAll('tbody tr td')]
+            .map(td => td.textContent.trim())
+            .filter(Boolean);
+    }
 
-    function getDeliverables(doc) {
+    // Anything under "webapps/<portal>/" or "jaggeryapps/<portal>/" is a UI
+    // change to that portal, regardless of what kind of file it is (bundle,
+    // package.json, jsp page, jsx source, ...).
+    const PORTAL_MARKERS = [
+        [/(?:webapps|jaggeryapps)\/devportal\//, 'Developer'],
+        [/(?:webapps|jaggeryapps)\/publisher\//, 'Publisher'],
+        [/(?:webapps|jaggeryapps)\/admin\//, 'Admin'],
+    ];
+
+    function getFileRows(doc) {
         // The same file change is listed once per applicable product
         // profile (wso2am, wso2am-tm, ...) - dedupe across profiles.
         // Each product also has a separate "Bundles Info Changes" table
@@ -58,42 +77,82 @@
                 if (!seen.has(key)) seen.set(key, { file: cells[0], operation: cells[1] || '' });
             });
         });
-        const rows = [...seen.values()];
-        if (rows.length === 0) return null;
+        return [...seen.values()];
+    }
 
-        // Portal UI updates touch dozens of files under "webapps/<app>/..."
-        // (bundles, package.json, locales, jsp pages) - summarize those as
-        // "UI(<portal> portal)" instead of listing every row.
-        const webapps = new Set();
-        const allWebapp = rows.every(row => {
-            const match = row.file.match(/webapps\/([^/]+)\//);
-            if (match) webapps.add(match[1]);
-            return !!match;
+    // Splits every changed file into: portal UI changes (summarized as
+    // "UI(<portal> portal)"), .jar/.war deliverables, and everything else
+    // (config/xml/scripts/...), which needs manual handling on the box.
+    function classifyRows(doc) {
+        const portals = new Set();
+        const deliverableRows = [];
+        const manualRows = [];
+
+        getFileRows(doc).forEach(row => {
+            const marker = PORTAL_MARKERS.find(([pattern]) => pattern.test(row.file));
+            if (marker) {
+                portals.add(marker[1]);
+            } else if (/\.(jar|war)$/i.test(row.file)) {
+                deliverableRows.push(row);
+            } else {
+                manualRows.push(row);
+            }
         });
 
-        if (allWebapp && webapps.size > 0) {
-            const labels = [...webapps].map(name => WEBAPP_LABELS[name] || (name.charAt(0).toUpperCase() + name.slice(1)));
-            return `UI(${labels.join(', ')} portal)`;
-        }
+        return { portals, deliverableRows, manualRows };
+    }
 
-        // Group the remaining rows into "Modified:" / "Added:" / "Removed:"
-        // bullet lists, in that fixed order, skipping any that are empty.
-        const OPERATION_ORDER = ['Modified', 'Added', 'Removed'];
-        const byOperation = new Map();
+    // Groups rows into "<label>:" bullet lists, in a fixed label order,
+    // skipping any that are empty. `labelFor` maps a row's raw DOM
+    // operation (Modified/Added/Removed) to the display label to group by.
+    function groupRowsByOperation(rows, orderedLabels, labelFor) {
+        const byLabel = new Map();
         rows.forEach(row => {
-            const op = row.operation || 'Other';
-            if (!byOperation.has(op)) byOperation.set(op, []);
-            byOperation.get(op).push(row.file);
+            const label = labelFor(row.operation);
+            if (!byLabel.has(label)) byLabel.set(label, []);
+            byLabel.get(label).push(row.file);
         });
-        const orderedOps = [
-            ...OPERATION_ORDER,
-            ...[...byOperation.keys()].filter(op => !OPERATION_ORDER.includes(op)),
+        const allLabels = [
+            ...orderedLabels,
+            ...[...byLabel.keys()].filter(label => !orderedLabels.includes(label)),
         ];
+        return allLabels
+            .filter(label => byLabel.has(label))
+            .map(label => `${label}:\n${byLabel.get(label).map(file => `  - ${file}`).join('\n')}`);
+    }
 
-        return orderedOps
-            .filter(op => byOperation.has(op))
-            .map(op => `${op}:\n${byOperation.get(op).map(file => `  - ${file}`).join('\n')}`)
-            .join('\n');
+    function getDeliverables({ portals, deliverableRows }) {
+        const sections = groupRowsByOperation(deliverableRows, ['Modified', 'Added', 'Removed'], op => op || 'Other');
+        if (portals.size > 0) sections.push(`UI(${[...portals].join(', ')} portal)`);
+        return sections.length ? sections.join('\n') : null;
+    }
+
+    function getManualFiles({ manualRows }) {
+        const sections = groupRowsByOperation(
+            manualRows,
+            ['Modified', 'Added', 'Deleted'],
+            op => (op === 'Removed' ? 'Deleted' : op || 'Other'),
+        );
+        return sections.length ? sections.join('\n') : null;
+    }
+
+    function getClosestEta(doc) {
+        // Best/Most Likely/Worst Case are three estimates for the same
+        // event - only show the soonest one that hasn't already passed
+        // (falling through to the next if it has). If all three are
+        // already in the past, fall back to the latest of them.
+        const candidates = [
+            { label: 'Best Case', date: getInputValue(doc, 'bestCase') },
+            { label: 'Most Likely', date: getInputValue(doc, 'mostLikely') },
+            { label: 'Worst Case', date: getInputValue(doc, 'worstCase') },
+        ].filter(c => c.date);
+        if (candidates.length === 0) return null;
+
+        candidates.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        return candidates.find(c => new Date(c.date) >= today) || candidates[candidates.length - 1];
     }
 
     function getLifecycleStatus(doc) {
@@ -133,6 +192,14 @@
         const securityIssue = getInputValue(doc, 'securityInternalGitIssue');
         if (securityIssue) lines.push(`Security Internal Issue: ${securityIssue}`);
 
+        const securityAdvisories = getSecurityAdvisories(doc);
+        if (securityAdvisories.length === 1) {
+            lines.push(`Security Advisory: ${securityAdvisories[0]}`);
+        } else if (securityAdvisories.length > 1) {
+            lines.push('Security Advisory:');
+            securityAdvisories.forEach(name => lines.push(`  - ${name}`));
+        }
+
         const publicIssues = getPublicIssues(doc);
         if (publicIssues.length === 1) {
             lines.push(`Public Issue: ${publicIssues[0]}`);
@@ -141,20 +208,22 @@
             publicIssues.forEach(url => lines.push(`  - ${url}`));
         }
 
-        const deliverables = getDeliverables(doc);
+        const classifiedRows = classifyRows(doc);
+
+        const deliverables = getDeliverables(classifiedRows);
         if (deliverables) {
             lines.push('Deliverables:');
             lines.push(deliverables);
         }
 
-        const bestCase = getInputValue(doc, 'bestCase');
-        if (bestCase) lines.push(`Best Case ETA: ${bestCase}`);
+        const manualFiles = getManualFiles(classifiedRows);
+        if (manualFiles) {
+            lines.push('Manual Files:');
+            lines.push(manualFiles);
+        }
 
-        const mostLikely = getInputValue(doc, 'mostLikely');
-        if (mostLikely) lines.push(`Most Likely ETA: ${mostLikely}`);
-
-        const worstCase = getInputValue(doc, 'worstCase');
-        if (worstCase) lines.push(`Worst Case ETA: ${worstCase}`);
+        const eta = getClosestEta(doc);
+        if (eta) lines.push(`${eta.label} ETA: ${eta.date}`);
 
         const status = getLifecycleStatus(doc);
         if (status) {
