@@ -1,6 +1,6 @@
-/patch-message/*files
+/patch-message/*tmp
 /patch-message/*html
-/patch-message/*txt
+.DS_Store
 
 
 

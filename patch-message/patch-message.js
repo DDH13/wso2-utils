@@ -40,6 +40,8 @@
         return [...doc.querySelectorAll('#compatibleProducts > div[name]')];
     }
 
+    const WEBAPP_LABELS = { publisher: 'Publisher', devportal: 'Developer', admin: 'Admin' };
+
     function getDeliverables(doc) {
         // The same file change is listed once per applicable product
         // profile (wso2am, wso2am-tm, ...) - dedupe across profiles.
@@ -55,9 +57,9 @@
         const rows = [...seen.values()];
         if (rows.length === 0) return null;
 
-        // Publisher/devportal-style updates touch dozens of files under
-        // "webapps/<app>/..." (bundles, package.json, locales, jsp pages) -
-        // summarize those by app instead of listing every row.
+        // Portal UI updates touch dozens of files under "webapps/<app>/..."
+        // (bundles, package.json, locales, jsp pages) - summarize those as
+        // "UI(<portal> portal)" instead of listing every row.
         const webapps = new Set();
         const allWebapp = rows.every(row => {
             const match = row.file.match(/webapps\/([^/]+)\//);
@@ -66,7 +68,8 @@
         });
 
         if (allWebapp && webapps.size > 0) {
-            return `${[...webapps].join(', ')} - dist files`;
+            const labels = [...webapps].map(name => WEBAPP_LABELS[name] || (name.charAt(0).toUpperCase() + name.slice(1)));
+            return `UI(${labels.join(', ')} portal)`;
         }
 
         return rows.map(row => `${row.operation} ${row.file}`.trim()).join('\n');
