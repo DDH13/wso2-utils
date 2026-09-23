@@ -155,18 +155,16 @@
         return candidates.find(c => new Date(c.date) >= today) || candidates[candidates.length - 1];
     }
 
-    function getLifecycleStatus(doc) {
-        // Staging build status isn't a separate DOM field - it's read off
-        // the current lifecycle badge (the last ".wum_badge" span right
-        // before the lifecycle-history button).
+    function hasLifecycleState(doc) {
+        // Staging build status / Manual Testing always print PENDING (they
+        // get updated by hand once actually verified) - this just gates
+        // whether to show those lines at all, by checking a lifecycle badge
+        // is present (the last ".wum_badge" span right before the
+        // lifecycle-history button).
         const anchor = doc.getElementById('btnShowLifecycleStateChangeLogModal');
         let el = anchor ? anchor.previousElementSibling : null;
         while (el && !el.classList.contains('wum_badge')) el = el.previousElementSibling;
-        const state = el ? el.textContent.trim() : null;
-        if (!state) return null;
-
-        const STATE_STATUS_MAP = { Staging: 'PENDING', UATStaging: 'SUCCESS', Completed: 'SUCCESS' };
-        return STATE_STATUS_MAP[state] || state.toUpperCase();
+        return !!(el && el.textContent.trim());
     }
 
     const COMPONENT_LABELS = [
@@ -225,9 +223,8 @@
         const eta = getClosestEta(doc);
         if (eta) lines.push(`${eta.label} ETA: ${eta.date}`);
 
-        const status = getLifecycleStatus(doc);
-        if (status) {
-            lines.push(`Staging build status: ${status}`);
+        if (hasLifecycleState(doc)) {
+            lines.push('Staging build status: PENDING');
             lines.push('Manual Testing: PENDING');
         }
 
