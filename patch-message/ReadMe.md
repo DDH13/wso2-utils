@@ -30,3 +30,4 @@ When you are on the UMT view update page:
 
 1. Press **`Cmd + L`** (Mac) or **`Ctrl + L`** (Windows) to highlight the address bar.
 2. Type **`pm`** and press **`Enter`**.
+3. The Update description will be copied to your clipboard and also logged in the browser console (in case of clipboard permission issues)
