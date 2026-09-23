@@ -19,7 +19,7 @@ Copy the `patch-message.bookmarklet.txt` snippet to use as your search engine UR
 3. Fill out the fields as follows:
    * **Name:** `Patch Message`
    * **Shortcut:** `pm` *(or your preferred short trigger)*
-   * **URL:** Paste the JavaScript code block above.
+   * **URL:** Paste the content of `patch-message.bookmarklet.txt` into it.
 4. Click **Save**.
 
 ---
