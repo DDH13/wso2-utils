@@ -37,7 +37,16 @@
     }
 
     function getProductDivs(doc) {
-        return [...doc.querySelectorAll('#compatibleProducts > div[name]')];
+        // Fully applicable products live under #compatibleProducts; products
+        // where only some of the changed files apply get their own
+        // #partialApplicableProducts section instead. Both have the same
+        // per-product file-change table shape, so file-row extraction wants
+        // both - getApplicableComponents queries them separately below to
+        // tell full vs. partial apart.
+        return [
+            ...doc.querySelectorAll('#compatibleProducts > div[name]'),
+            ...doc.querySelectorAll('#partialApplicableProducts > div[name]'),
+        ];
     }
 
     function getSecurityAdvisories(doc) {
@@ -175,9 +184,17 @@
     ];
 
     function getApplicableComponents(doc) {
-        const names = new Set(getProductDivs(doc).map(div => div.getAttribute('name')));
-        if (names.size <= 1) return null; // only the default AIO pack - not worth calling out
-        const labels = COMPONENT_LABELS.filter(([name]) => names.has(name)).map(([, label]) => label);
+        const fullNames = new Set(
+            [...doc.querySelectorAll('#compatibleProducts > div[name]')].map(div => div.getAttribute('name')),
+        );
+        const partialNames = new Set(
+            [...doc.querySelectorAll('#partialApplicableProducts > div[name]')].map(div => div.getAttribute('name')),
+        );
+        if (fullNames.size <= 1 && partialNames.size === 0) return null; // only the default AIO pack - not worth calling out
+        const fullLabels = COMPONENT_LABELS.filter(([name]) => fullNames.has(name)).map(([, label]) => label);
+        const partialLabels = COMPONENT_LABELS.filter(([name]) => partialNames.has(name))
+            .map(([, label]) => `${label} (Partially Applicable)`);
+        const labels = [...fullLabels, ...partialLabels];
         return labels.length ? labels.join(', ') : null;
     }
 
