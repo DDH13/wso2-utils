@@ -1,0 +1,289 @@
+checkUpdateJars() {
+  setopt localoptions extendedglob noshwordsplit
+  local DEFAULT_REPO="wso2-enterprise/wso2-apim-internal"
+  local VERBOSE=false
+  local REF=""
+
+  # 1. Argument Parsing
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -v|--verbose) VERBOSE=true ;;
+      -h|--help)
+        echo "Usage: checkUpdateJars [-v] <issue-url | issue-number>"
+        echo "  Checks the .jar deliverables listed in an update-tracking issue against a pack."
+        echo "  A bare issue number assumes ${DEFAULT_REPO}."
+        echo "  -v  print what was parsed from the issue description before checking"
+        return 0
+        ;;
+      *) REF="$1" ;;
+    esac
+    shift
+  done
+
+  if [[ -z "$REF" ]]; then
+    echo "❌ Error: No issue supplied."
+    echo "Usage: checkUpdateJars [-v] <issue-url | issue-number>"
+    return 1
+  fi
+
+  REF="${REF#\#}"
+  if [[ "$REF" == <-> ]]; then
+    REF="https://github.com/${DEFAULT_REPO}/issues/${REF}"
+  fi
+
+  # 2. Fetch the issue description
+  #    CHECK_UPDATE_JARS_BODY_FILE lets you test the parser against a local file.
+  local BODY
+  if [[ -n "$CHECK_UPDATE_JARS_BODY_FILE" ]]; then
+    if [[ ! -f "$CHECK_UPDATE_JARS_BODY_FILE" ]]; then
+      echo "❌ Error: Body file not found: $CHECK_UPDATE_JARS_BODY_FILE"
+      return 1
+    fi
+    BODY="$(<"$CHECK_UPDATE_JARS_BODY_FILE")"
+  else
+    if ! command -v gh >/dev/null 2>&1; then
+      echo "❌ Error: gh (GitHub CLI) is not installed."
+      return 1
+    fi
+    echo "🔎 Fetching issue: $REF"
+    BODY="$(gh issue view "$REF" --json body -q .body)" || {
+      echo "❌ Error: Could not fetch the issue (see gh error above)."
+      return 1
+    }
+  fi
+
+  if [[ -z "${BODY//[[:space:]]/}" ]]; then
+    echo "❌ Error: The issue description is empty."
+    return 1
+  fi
+
+  # 3. Ask for the pack location
+  local input PACK_HOME
+  read -r "input?📦 Path to APIM pack (Enter = current dir is the pack's bin): "
+  input="${input##[[:space:]]#}"
+  input="${input%%[[:space:]]#}"
+  input="${input#[\"\']}"
+  input="${input%[\"\']}"
+  input="${input//\\ / }"
+  input="${input/#\~/$HOME}"
+
+  if [[ -z "$input" ]]; then
+    PACK_HOME="$(dirname "$PWD")"
+  else
+    input="${input%%/##}"
+    [[ -z "$input" ]] && input="/"
+    if [[ "${input:t}" == "bin" ]]; then
+      PACK_HOME="${input:h}"
+    else
+      PACK_HOME="$input"
+    fi
+  fi
+  PACK_HOME="${PACK_HOME:A}"
+
+  if [[ ! -d "${PACK_HOME}/repository/components" ]]; then
+    echo "❌ Error: Not an APIM pack (no repository/components): $PACK_HOME"
+    return 1
+  fi
+  echo "📂 Pack: $PACK_HOME"
+
+  # Top-level pack dirs, used to strip junk prefixes (<PRODUCT_HOME>/, wso2am-x/, abs paths).
+  local -a TOP_DIRS=(repository lib bin dbscripts modules resources)
+  local d
+  for d in "${PACK_HOME}"/*(N/); do
+    TOP_DIRS+=("${d:t}")
+  done
+  TOP_DIRS=(${(u)TOP_DIRS})
+
+  # 4. Tolerant parsing of the description
+  local -a ALL_UPDS=() E_UPD=() E_SEC=() E_PATH=()
+  local -A SEEN=() UPD_HAS_JAR=()
+  local NO_UPD="(no update id)"
+  local cur_upd="$NO_UPD" cur_sec="UNKNOWN"
+  local raw line lower head w p key
+  local -i i found
+  local -a words segs
+
+  for raw in "${(@f)BODY}"; do
+    line="${raw//$'\r'/}"
+    line="${line//$'\t'/ }"
+    lower="${(L)line}"
+
+    # Update id: updateId=NNNN anywhere, or a line starting with U2 ... NNNN
+    if [[ "$lower" =~ 'updateid=([0-9]+)' ]] || \
+       [[ "$lower" =~ '^[-*+#> ]*u2[^0-9a-z]*[^0-9]*([0-9]{4,})' ]]; then
+      cur_upd="${match[1]}"
+      cur_sec="UNKNOWN"
+      (( ${ALL_UPDS[(Ie)$cur_upd]} )) || ALL_UPDS+=("$cur_upd")
+      continue
+    fi
+
+    # Strip markdown / HTML noise
+    line="${line//\*\*/}"
+    line="${line//\`/}"
+    line="${line//<[^>]#>/ }"
+    head="${(L)line}"
+    head="${head##[-*+#>[:space:]]#}"
+
+    # Section header (text after it on the same line is still scanned for jars)
+    if [[ "$head" =~ '^(added|new|modified|updated|changed|removed|deleted)( files?| jars?| artifacts?)?[[:space:]]*(:|-|$)' ]]; then
+      case "${match[1]}" in
+        added|new) cur_sec="ADDED" ;;
+        modified|updated|changed) cur_sec="MODIFIED" ;;
+        removed|deleted) cur_sec="REMOVED" ;;
+      esac
+    elif [[ "$head" == ---* ]]; then
+      cur_sec="UNKNOWN"
+      continue
+    elif [[ "$head" =~ '^[a-z][a-z ]+:' ]]; then
+      # Any other "Key: value" line (ETA, Staging build status, Deliverables...) ends a section
+      cur_sec="UNKNOWN"
+    fi
+
+    [[ "${(L)line}" == *.jar* ]] || continue
+
+    # Pull out every *.jar token
+    line="${line//[,;\"\'()<>|\[\]]/ }"
+    words=(${=line})
+    for w in "${words[@]}"; do
+      [[ "$w" == *://* ]] && continue
+      w="${w##[*_~]#}"
+      w="${w%%[*_~.:]#}"
+      [[ "$w" == (#i)*.jar ]] || continue
+
+      # Path cleanup
+      p="${w//\\//}"
+      p="${p##(./|/)#}"
+      segs=(${(s:/:)p})
+      if (( ${#segs} > 1 )); then
+        found=0
+        for (( i = 1; i < ${#segs}; i++ )); do
+          if (( ${TOP_DIRS[(Ie)${segs[$i]}]} )); then
+            found=1
+            break
+          fi
+        done
+        (( found )) && p="${(j:/:)segs[$i,-1]}"
+      fi
+      [[ -z "$p" ]] && continue
+
+      key="${cur_upd}|${cur_sec}|${p}"
+      (( ${+SEEN[$key]} )) && continue
+      SEEN[$key]=1
+      E_UPD+=("$cur_upd")
+      E_SEC+=("$cur_sec")
+      E_PATH+=("$p")
+      UPD_HAS_JAR[$cur_upd]=1
+      if [[ "$cur_upd" == "$NO_UPD" ]] && (( ! ${ALL_UPDS[(Ie)$NO_UPD]} )); then
+        ALL_UPDS=("$NO_UPD" "${ALL_UPDS[@]}")
+      fi
+    done
+  done
+
+  local n
+  if $VERBOSE; then
+    echo "───────────────────────────────────"
+    echo "🧾 Parsed from description:"
+    echo "  Updates: ${ALL_UPDS[*]:-none}"
+    for (( n = 1; n <= ${#E_PATH}; n++ )); do
+      printf "  [%s] %-8s %s\n" "${E_UPD[$n]}" "${E_SEC[$n]}" "${E_PATH[$n]}"
+    done
+  fi
+
+  if (( ${#E_PATH} == 0 )); then
+    echo "───────────────────────────────────"
+    echo "ℹ️  No .jar deliverables found in the issue description."
+    $VERBOSE || echo "   Re-run with -v to see what was parsed."
+    return 0
+  fi
+
+  # 5. Check each jar against the pack
+  local -a INDEX
+  INDEX=("${PACK_HOME}"/**/*.(#i)jar(N.))
+  INDEX=("${INDEX[@]#${PACK_HOME}/}")
+
+  local -i OK=0 WARN=0 FAIL=0 UNKNOWN_SEC=0
+  local upd sec fname base status_icon msg exact
+  local -a same_name others
+
+  for upd in "${ALL_UPDS[@]}"; do
+    echo "───────────────────────────────────"
+    if [[ "$upd" == "$NO_UPD" ]]; then
+      echo "📋 $NO_UPD"
+    else
+      echo "📋 U2 update $upd"
+    fi
+
+    if (( ! ${+UPD_HAS_JAR[$upd]} )); then
+      echo "   ℹ️  No .jar deliverables listed."
+      continue
+    fi
+
+    for (( n = 1; n <= ${#E_PATH}; n++ )); do
+      [[ "${E_UPD[$n]}" == "$upd" ]] || continue
+      sec="${E_SEC[$n]}"
+      p="${E_PATH[$n]}"
+      fname="${p:t}"
+      base="${fname%%[_-][0-9]*}"
+      [[ "$base" == "$fname" ]] && base="${fname%.(#i)jar}"
+
+      same_name=(${(M)INDEX:#(*/|)${(b)fname}})
+      others=(${(M)INDEX:#(*/|)${(b)base}[_-][0-9]*.(#i)jar})
+      others=(${others:#(*/|)${(b)fname}})
+
+      exact=false
+      if [[ "$p" == */* ]]; then
+        [[ -f "${PACK_HOME}/${p}" ]] && exact=true
+        same_name=(${same_name:#${(b)p}})
+      elif (( ${#same_name} )); then
+        exact=true
+      fi
+
+      case "$sec" in
+        ADDED|MODIFIED)
+          if $exact; then
+            status_icon="✅"; msg="present"; (( OK++ ))
+            [[ "$p" != */* ]] && msg="present at ${(j:, :)same_name}"
+          elif (( ${#same_name} )); then
+            status_icon="⚠️ "; msg="not at listed path, but found at: ${(j:, :)same_name}"; (( WARN++ ))
+          else
+            status_icon="❌"; msg="MISSING from pack"; (( FAIL++ ))
+            (( ${#others} )) && msg+=" — pack has: ${(j:, :)others}"
+          fi
+          ;;
+        REMOVED)
+          if $exact; then
+            status_icon="❌"; msg="still PRESENT in pack"; (( FAIL++ ))
+          elif (( ${#same_name} )); then
+            status_icon="⚠️ "; msg="removed from listed path, but still at: ${(j:, :)same_name}"; (( WARN++ ))
+          elif (( ${#others} )); then
+            status_icon="⚠️ "; msg="removed, but other version present: ${(j:, :)others}"; (( WARN++ ))
+          else
+            status_icon="✅"; msg="absent"; (( OK++ ))
+          fi
+          ;;
+        *)
+          (( UNKNOWN_SEC++ ))
+          (( WARN++ ))
+          status_icon="⚠️ "
+          if $exact || (( ${#same_name} )); then
+            msg="present (section not identified in description)"
+          else
+            msg="not in pack (section not identified in description)"
+            (( ${#others} )) && msg+=" — pack has: ${(j:, :)others}"
+          fi
+          ;;
+      esac
+
+      printf "   %s [%s] %s\n      %s\n" "$status_icon" "$sec" "$p" "$msg"
+    done
+  done
+
+  # 6. Summary
+  echo "───────────────────────────────────"
+  echo "📊 ${#E_PATH} jar(s) checked · ✅ ${OK} ok · ⚠️  ${WARN} warning(s) · ❌ ${FAIL} failed"
+  if (( UNKNOWN_SEC )); then
+    echo "⚠️  ${UNKNOWN_SEC} jar(s) were listed outside an Added/Modified/Removed section — check the description."
+  fi
+
+  (( FAIL == 0 ))
+}

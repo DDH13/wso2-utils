@@ -183,7 +183,22 @@
         ['wso2am-universal-gw', 'UGW'],
     ];
 
+    // The AIO/ACP/TM/UGW product split only exists from APIM 4.5.0 onward -
+    // earlier updates only ever shipped the single wso2am pack, so calling
+    // out "applicable components" there would be meaningless noise. Read the
+    // version off the first row of the products table (every row shares the
+    // same major.minor.patch - only the trailing build number differs per
+    // component).
+    function meetsMinApimVersion(doc, minMajor, minMinor) {
+        const versionText = doc.querySelector('#productTable tbody tr td:nth-child(2)')?.textContent?.trim();
+        const match = versionText && versionText.match(/^(\d+)\.(\d+)/);
+        if (!match) return false;
+        const [major, minor] = [Number(match[1]), Number(match[2])];
+        return major > minMajor || (major === minMajor && minor >= minMinor);
+    }
+
     function getApplicableComponents(doc) {
+        if (!meetsMinApimVersion(doc, 4, 5)) return null;
         const fullNames = new Set(
             [...doc.querySelectorAll('#compatibleProducts > div[name]')].map(div => div.getAttribute('name')),
         );

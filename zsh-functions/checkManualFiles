@@ -28,10 +28,11 @@ checkManualFiles() {
   echo "   Press Enter on an empty line when done."
 
   local -a FILES=()
-  local rel confirm
+  local rel confirm f
   while true; do
     while true; do
-      read -r "rel?  > "
+      # EOF (e.g. piped stdin ran out) ends path entry like an empty line.
+      read -r "rel?  > " || break
       [[ -z "$rel" ]] && break
 
       if [[ -f "${TARGET_DIR}/${rel}" ]]; then
@@ -48,12 +49,15 @@ checkManualFiles() {
 
     echo "───────────────────────────────────"
     echo "You entered ${#FILES[@]} file(s):"
-    local f
     for f in "${FILES[@]}"; do
       echo "  - $f"
     done
 
-    read -r "confirm?Finished entering paths? Proceed to staging update? (y/n) "
+    if ! read -r "confirm?Finished entering paths? Proceed to staging update? (y/n) "; then
+      # EOF here would otherwise loop forever re-prompting.
+      echo "❌ Error: No confirmation received (stdin closed). Aborting."
+      return 1
+    fi
     if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
       break
     fi
@@ -62,7 +66,6 @@ checkManualFiles() {
 
   # 4. Snapshot the requested files before the staging update.
   local BASELINE_DIR=$(mktemp -d)
-  local f
   for f in "${FILES[@]}"; do
     mkdir -p "$(dirname "${BASELINE_DIR}/${f}")"
     cp "${TARGET_DIR}/${f}" "${BASELINE_DIR}/${f}"
@@ -117,6 +120,10 @@ checkManualFiles() {
   echo "───────────────────────────────────"
   echo "🔎 Checking manually tracked files for changes..."
   for f in "${FILES[@]}"; do
+    if [[ ! -f "${TARGET_DIR}/${f}" ]]; then
+      echo "⚠️  removed by staging update: $f"
+      continue
+    fi
     if git --no-pager diff --no-index --color=always -- "${BASELINE_DIR}/${f}" "${TARGET_DIR}/${f}" > /dev/null; then
       echo "✅ unchanged: $f"
     else

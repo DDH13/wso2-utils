@@ -7,17 +7,29 @@
 configureIS7() {
 
   # --- Argument Validation ---
-  if [ -z "$1" ] || [ -z "$2" ]; then
+  local ds=0
+  local -a positionals=()
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+      --DS) ds=1 ;;
+      *)    positionals+=("$arg") ;;
+    esac
+  done
+
+  if [ -z "${positionals[1]}" ] || [ -z "${positionals[2]}" ]; then
     echo "❌ Error: Missing required arguments." >&2
-    echo "   Usage: configureIS7 <is_version> <am_version>" >&2
+    echo "   Usage: configureIS7 <is_version> <am_version> [--DS]" >&2
     echo "   Example: configureIS7 7.1.0 4.3.0" >&2
+    echo "   --DS: configure against the distributed setup (ACP) instead of the all-in-one pack" >&2
     return 1
   fi
-  local is_version="$1"
-  local am_version="$2"
+  local is_version="${positionals[1]}"
+  local am_version="${positionals[2]}"
 
   # --- Configuration ---
   local base_dir="/Users/dineth/Code/APIM-packs-patches"
+  local ds_dir="/Users/dineth/Code/apim-distributed-dev-setup/components"
   local is_product_dir="${base_dir}/wso2is-${is_version}"
   local cert_filename="wso2carbon.cer"
   local cert_password="wso2carbon"
@@ -33,13 +45,34 @@ configureIS7() {
   local JAR_SOURCE="/Users/dineth/Code/is-km-stuff/wso2is.notification.event.handlers-${jar_version}.jar"
   local JAR_DESTINATION="${is_product_dir}/repository/components/dropins/"
 
-  local am_product_dir="${base_dir}/wso2am-${am_version}"
+  local am_product_dir
+  local am_label
+  if [ "$ds" -eq 1 ]; then
+    am_product_dir="${ds_dir}/wso2am-acp"
+    am_label="Distributed Setup (ACP)"
+  else
+    am_product_dir="${base_dir}/wso2am-${am_version}"
+    am_label="AM ${am_version}"
+  fi
 
   # Define the full paths to the security directories
   local is_sec_dir="${is_product_dir}/repository/resources/security"
   local am_sec_dir="${am_product_dir}/repository/resources/security"
 
   # --- Pre-flight Checks ---
+  if [ "$ds" -eq 1 ]; then
+    echo "🔎 Verifying that distributed setup components exist in ${ds_dir}..."
+    local component
+    local -a missing=()
+    for component in wso2am-acp wso2am-tm wso2am-universal-gw; do
+      [ -d "${ds_dir}/${component}" ] || missing+=("$component")
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+      echo "❌ Error: Distributed setup component(s) not found in ${ds_dir}: ${missing[*]}" >&2
+      return 1
+    fi
+  fi
+
   echo "🔎 Verifying that product directories exist..."
   if [ ! -d "$is_sec_dir" ]; then
     echo "❌ Error: Identity Server security directory not found at: ${is_sec_dir}" >&2
@@ -59,6 +92,24 @@ configureIS7() {
   # ==============================
 
   printf "\n⚙️ Starting IS Configuration and Certificate Exchange...\n"
+
+  # In the distributed setup ACP/TM/GW use offsets 0/1/2, so IS moves to offset 3
+  # (9446) to avoid a port clash with TM on 9444. Idempotent: replaces an
+  # existing uncommented offset, otherwise inserts it under [server].
+  if [ "$ds" -eq 1 ]; then
+    echo "Setting IS port offset to 3 in ${TOML_FILE}..."
+    if grep -Eq '^[[:space:]]*offset[[:space:]]*=' "$TOML_FILE"; then
+      sed -i '' -E 's/^[[:space:]]*offset[[:space:]]*=.*/offset = 3/' "$TOML_FILE" \
+        || { echo "❌ Error: Failed to update offset in ${TOML_FILE}" >&2; return 1; }
+    elif grep -q '^\[server\]' "$TOML_FILE"; then
+      sed -i '' 's/^\[server\]$/[server]\
+offset = 3/' "$TOML_FILE" \
+        || { echo "❌ Error: Failed to set offset in ${TOML_FILE}" >&2; return 1; }
+    else
+      echo "❌ Error: No [server] section found in ${TOML_FILE} to set the offset." >&2
+      return 1
+    fi
+  fi
 
   # === NEW Configuration Steps (Moved from freshISPack) ===
   # 1. Append configurations to deployment.toml using a heredoc
@@ -101,7 +152,7 @@ EOF
   # =======================================================
   
   # --- Process Start ---
-  echo "\n🚀 Starting certificate exchange between IS ${is_version} and AM ${am_version}..."
+  echo "\n🚀 Starting certificate exchange between IS ${is_version} and ${am_label}..."
 
   # === Part 1: Trust IS Certificate in AM ===
   echo "\n[Part 1/2] Configuring AM to trust IS..."
@@ -110,13 +161,25 @@ EOF
   keytool -export -keystore "${is_sec_dir}/wso2carbon.p12" -alias wso2carbon -file "${is_sec_dir}/${cert_filename}" -storepass "${cert_password}" \
     || { echo "❌ Error: Failed to export IS certificate." >&2; return 1; }
 
-  echo "  (2/3) Importing IS certificate into AM truststore (client-truststore.jks)..."
-  # Drop any stale alias first so re-running against an already-configured pack
-  # doesn't fail with "Certificate not imported, alias <...> already exists".
-  keytool -delete -alias wso2is_cert -keystore "${am_sec_dir}/client-truststore.jks" -storepass "${cert_password}" 2>/dev/null
-  # Use -noprompt to automatically answer "yes" to the trust question.
-  keytool -import -alias wso2is_cert -file "${is_sec_dir}/${cert_filename}" -keystore "${am_sec_dir}/client-truststore.jks" -storepass "${cert_password}" -noprompt \
-    || { echo "❌ Error: Failed to import IS certificate into AM truststore." >&2; rm -f "${is_sec_dir}/${cert_filename}"; return 1; }
+  # In the distributed setup every component must trust IS: the gateway fetches
+  # the IS JWKS to validate tokens (otherwise: PKIX failure -> "Unclassified
+  # Authentication Failure"), so import into ACP, TM and the gateway.
+  local -a trust_sec_dirs=("$am_sec_dir")
+  if [ "$ds" -eq 1 ]; then
+    trust_sec_dirs+=("${ds_dir}/wso2am-tm/repository/resources/security" "${ds_dir}/wso2am-universal-gw/repository/resources/security")
+  fi
+
+  echo "  (2/3) Importing IS certificate into AM truststore(s) (client-truststore.jks)..."
+  local trust_dir
+  for trust_dir in "${trust_sec_dirs[@]}"; do
+    echo "    -> ${trust_dir}"
+    # Drop any stale alias first so re-running against an already-configured pack
+    # doesn't fail with "Certificate not imported, alias <...> already exists".
+    keytool -delete -alias wso2is_cert -keystore "${trust_dir}/client-truststore.jks" -storepass "${cert_password}" 2>/dev/null
+    # Use -noprompt to automatically answer "yes" to the trust question.
+    keytool -import -alias wso2is_cert -file "${is_sec_dir}/${cert_filename}" -keystore "${trust_dir}/client-truststore.jks" -storepass "${cert_password}" -noprompt \
+      || { echo "❌ Error: Failed to import IS certificate into truststore in ${trust_dir}." >&2; rm -f "${is_sec_dir}/${cert_filename}"; return 1; }
+  done
 
   echo "  (3/3) Cleaning up temporary certificate file..."
   rm "${is_sec_dir}/${cert_filename}" || echo "⚠️  Warning: Failed to remove temp file ${is_sec_dir}/${cert_filename}" >&2

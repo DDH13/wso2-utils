@@ -1,0 +1,204 @@
+closePatchIssue() {
+  setopt localoptions extendedglob noshwordsplit
+  local DEFAULT_REPO="wso2-enterprise/wso2-apim-internal"
+  local USAGE="Usage: closePatchIssue [-y] [--force] <issue-number | issue-url> [--public <PR link>...]"
+  local REF="" ASSUME_YES=false FORCE=false
+  local -a PUBLIC_PRS
+  local MODE="ref" PUBLIC_GIVEN=false PUBLIC_NA=false
+
+  # 1. Argument Parsing
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help)
+        echo "$USAGE"
+        echo "  Builds the patch-closure grid (U2 No. / Status / U2 PR / Master Fix) from the"
+        echo "  issue, posts it as a comment and closes the issue. A bare number assumes"
+        echo "  ${DEFAULT_REPO}."
+        echo "  --public <links>  one or more public (master) PR links, or N/A if there is no public fix."
+        echo "                    Labels the issue Resolution/Released in Public (or ... N/A in public)."
+        echo "                    Without --public the comment is posted but the issue is not labelled or closed."
+        echo "  -y                skip the confirmation prompt"
+        echo "  --force           close even if the U2 is not marked released"
+        return 0
+        ;;
+      -y|--yes) ASSUME_YES=true; MODE="ref" ;;
+      --force) FORCE=true; MODE="ref" ;;
+      --public) MODE="public"; PUBLIC_GIVEN=true ;;
+      -*)
+        echo "❌ Error: Unknown option: $1"
+        echo "$USAGE"
+        return 1
+        ;;
+      *)
+        if [[ "$MODE" == "public" ]]; then
+          PUBLIC_PRS+=("$1")
+        elif [[ -z "$REF" ]]; then
+          REF="$1"
+        else
+          echo "❌ Error: Unexpected argument: $1 (use --public before PR links)"
+          return 1
+        fi
+        ;;
+    esac
+    shift
+  done
+
+  if [[ "$PUBLIC_GIVEN" == true && ${#PUBLIC_PRS[@]} -eq 0 ]]; then
+    echo "❌ Error: --public needs one or more PR links (or N/A)."
+    return 1
+  fi
+  local LABEL=""
+  if [[ "$PUBLIC_GIVEN" == true ]]; then
+    local p
+    for p in "${PUBLIC_PRS[@]}"; do
+      [[ "${(L)p}" == (n/a|na) ]] && PUBLIC_NA=true
+    done
+    if [[ "$PUBLIC_NA" == true && ${#PUBLIC_PRS[@]} -gt 1 ]]; then
+      echo "❌ Error: N/A can't be combined with PR links."
+      return 1
+    fi
+    if [[ "$PUBLIC_NA" == true ]]; then
+      LABEL="Resolution/Released N/A in public"
+    else
+      LABEL="Resolution/Released in Public"
+    fi
+  fi
+
+  if [[ -z "$REF" ]]; then
+    echo "❌ Error: No issue supplied."
+    echo "$USAGE"
+    return 1
+  fi
+
+  REF="${REF#\#}"
+  local REPO="$DEFAULT_REPO" NUM="$REF"
+  if [[ "$REF" =~ '^https://github.com/([^/]+/[^/]+)/issues/([0-9]+)' ]]; then
+    REPO="${match[1]}"
+    NUM="${match[2]}"
+  elif [[ "$REF" != <-> ]]; then
+    echo "❌ Error: '$REF' is not an issue number or issue URL."
+    return 1
+  fi
+
+  # 2. Fetch the issue
+  #    CLOSE_PATCH_ISSUE_JSON_FILE lets you test against a local file (implies dry run).
+  local JSON DRY_RUN=false
+  if [[ -n "$CLOSE_PATCH_ISSUE_JSON_FILE" ]]; then
+    if [[ ! -f "$CLOSE_PATCH_ISSUE_JSON_FILE" ]]; then
+      echo "❌ Error: JSON file not found: $CLOSE_PATCH_ISSUE_JSON_FILE"
+      return 1
+    fi
+    JSON="$(<"$CLOSE_PATCH_ISSUE_JSON_FILE")"
+    DRY_RUN=true
+  else
+    if ! command -v gh >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+      echo "❌ Error: gh (GitHub CLI) and jq are required."
+      return 1
+    fi
+    echo "🔎 Fetching issue: ${REPO}#${NUM}"
+    JSON="$(gh issue view "$NUM" -R "$REPO" --json title,state,body,comments)" || {
+      echo "❌ Error: Could not fetch the issue (see gh error above)."
+      return 1
+    }
+    # PRs are often only linked via a cross-reference, which `gh issue view` doesn't return.
+    local XREFS
+    XREFS="$(gh api "repos/${REPO}/issues/${NUM}/timeline" --paginate \
+      -q '.[] | select(.event=="cross-referenced") | .source.issue.html_url // empty' 2>/dev/null)"
+    JSON="$(jq --arg x "$XREFS" '. + {xrefs: ($x | split("\n") | map(select(length > 0)))}' <<<"$JSON")"
+  fi
+
+  local TITLE STATE ALL_TEXT BOT_TEXT
+  TITLE="$(jq -r '.title' <<<"$JSON")"
+  STATE="$(jq -r '.state' <<<"$JSON")"
+  ALL_TEXT="$(jq -r '[.body, (.comments[].body), (.xrefs // [])[]] | join("\n")' <<<"$JSON")"
+  BOT_TEXT="$(jq -r '[.comments[] | select(.author.login | test("wso2updatecreator")) | .body] | join("\n")' <<<"$JSON")"
+  [[ -z "${BOT_TEXT//[[:space:]]/}" ]] && BOT_TEXT="$ALL_TEXT"
+
+  # 3. Extract the grid values
+  local U2_ID U2_CELL STATUS_CELL LEVEL RELEASED=false U2_PRS MASTER
+  U2_ID="$(grep -oE 'updateId=[0-9]+' <<<"$BOT_TEXT" | tail -1 | cut -d= -f2)"
+  if [[ -n "$U2_ID" ]]; then
+    U2_CELL="[${U2_ID}](https://umt.wso2.com/update?updateId=${U2_ID}&type=viewUpdate)"
+  else
+    U2_CELL="❓ not found"
+  fi
+
+  if grep -qi 'U2 update has been released' <<<"$BOT_TEXT"; then
+    RELEASED=true
+    LEVEL="$(grep -oE 'New update level: *[A-Za-z0-9._-]+' <<<"$BOT_TEXT" | tail -1 | sed -E 's/.*: *//')"
+    STATUS_CELL="✅ Released${LEVEL:+ ($LEVEL)}"
+  else
+    STATUS_CELL="⏳ Pending"
+  fi
+
+  U2_PRS="$(grep -oE 'https://github\.com/wso2-support/[A-Za-z0-9._-]+/pull/[0-9]+' <<<"$ALL_TEXT" | awk '!seen[$0]++' | tr '\n' ' ')"
+  U2_PRS="${U2_PRS% }"
+  [[ -z "$U2_PRS" ]] && U2_PRS="❓ not found"
+
+  local pr
+  for pr in "${PUBLIC_PRS[@]}"; do
+    [[ "$PUBLIC_NA" == true ]] && break
+    [[ "$pr" =~ '^https://github.com/wso2/[^/]+/pull/[0-9]+$' ]] ||
+      echo "⚠️  '$pr' doesn't look like a public wso2 PR link (keeping it anyway)."
+  done
+  MASTER="${(j: :)PUBLIC_PRS}"
+  [[ "$PUBLIC_NA" == true ]] && MASTER="N/A"
+  [[ -z "$MASTER" ]] && MASTER="❓ none specified"
+
+  # 4. Build the table
+  local NL=$'\n' TABLE
+  TABLE="| Item                    | Link / Status |${NL}"
+  TABLE+="|-------------------------|----------------|${NL}"
+  TABLE+="| **U2 No.**              | ${U2_CELL} |${NL}"
+  TABLE+="| **U2 Status**           | ${STATUS_CELL} |${NL}"
+  TABLE+="| **U2 PR**               | ${U2_PRS} |${NL}"
+  TABLE+="| **Master Fix**          | ${MASTER} |"
+
+  echo
+  echo "#${NUM}: ${TITLE}  [${STATE}]"
+  echo
+  echo "$TABLE"
+  echo
+
+  # 5. Guard rails
+  if [[ "$RELEASED" != true && "$FORCE" != true ]]; then
+    echo "❌ The U2 is not marked released, so nothing was posted. Use --force to override."
+    return 1
+  fi
+  if [[ "$DRY_RUN" == true ]]; then
+    echo "ℹ️  Dry run (CLOSE_PATCH_ISSUE_JSON_FILE set): nothing posted."
+    return 0
+  fi
+
+  # 6. Confirm, comment, close
+  if [[ "$ASSUME_YES" != true ]]; then
+    local REPLY PROMPT
+    if [[ "$PUBLIC_GIVEN" == true ]]; then
+      PROMPT="Post this comment, add label '${LABEL}' and close ${REPO}#${NUM}? [y/N] "
+    else
+      PROMPT="Post this comment on ${REPO}#${NUM} (no label, issue stays open)? [y/N] "
+    fi
+    read -q "REPLY?${PROMPT}"
+    echo
+    [[ "$REPLY" == y ]] || { echo "Aborted."; return 1; }
+  fi
+
+  gh issue comment "$NUM" -R "$REPO" --body "$TABLE" || {
+    echo "❌ Error: Failed to post the comment; issue left untouched."
+    return 1
+  }
+  if [[ "$PUBLIC_GIVEN" != true ]]; then
+    echo "ℹ️  No --public given: comment posted; issue not labelled or closed."
+    return 0
+  fi
+  gh issue edit "$NUM" -R "$REPO" --add-label "$LABEL" || {
+    echo "❌ Error: Failed to add label '$LABEL'; issue not closed."
+    return 1
+  }
+  if [[ "$STATE" == "CLOSED" ]]; then
+    echo "ℹ️  Issue was already closed; comment posted."
+  else
+    gh issue close "$NUM" -R "$REPO" || return 1
+  fi
+  echo "✅ Done."
+}

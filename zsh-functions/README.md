@@ -123,9 +123,9 @@ Same as `freshPack` but for the three distributed-setup packs (`acp`, `tm`,
 parallel, then runs the update tool for `acp` first alone (to resolve any
 tool self-update safely against the shared `~/.wso2-updates` cache), copies
 its now-current tool binary to `tm`/`gw`, then runs those two in parallel with
-live prefixed log streaming. `--prep` additionally copies the three updated
-packs (version suffix stripped) into
-`apim-distributed-dev-setup/components/`.
+live prefixed log streaming. `--prep` additionally empties
+`apim-distributed-dev-setup/components/` (keeping `.gitkeep`) and then copies
+the three updated packs (version suffix stripped) into it.
 
 #### `freshISPack <version>`
 Unzips `wso2is-<version>.zip` in `APIM-packs-patches/` and runs
@@ -159,7 +159,38 @@ before/after and reports which manually tracked files changed.
 
 #### `checkManualFilesDs <version>`
 Same idea as `checkManualFiles`, but checks the given paths across all three
-distributed-setup packs (`acp`/`tm`/`gw`) at once.
+distributed-setup packs (`acp`/`tm`/`gw`) at once. A path only needs to exist
+in at least one component: it's snapshotted and diffed only in the components
+that have it (e.g. gateway-only config in `gw`), and rejected only if it's
+missing from all three.
+
+#### `checkUpdateJars [-v] <issue-url | issue-number>`
+Fetches an update-tracking issue's description with `gh` (a bare number
+assumes `wso2-enterprise/wso2-apim-internal`), then prompts for a pack path
+(Enter = the current directory is the pack's `bin`). Checks every `.jar` listed
+under each U2 update's `Added:` / `Modified:` / `Removed:` section against the
+pack: added and modified jars must be there, and removed jars must be gone. It
+also flags jars found at a different path or in a different version. Parsing
+copes with messy descriptions: markdown/bold headers, any bullet style or none,
+inline comma lists, `<PRODUCT_HOME>/`-style prefixes and Windows paths. Jars
+listed outside a section are reported as warnings, not dropped. `-v` prints the
+parsed list. Returns non-zero if any check fails.
+
+#### `closePatchIssue [-y] [--force] <issue-number | issue-url> [--public <PR link>...]`
+Fetches a patch-tracking issue with `gh` (a bare number assumes
+`wso2-enterprise/wso2-apim-internal`) and fills the closure grid: **U2 No.**
+(from the `wso2updatecreator` bot's `UMT Entry` comment), **U2 Status** (✅
+Released + update level if the bot posted the release comment, else ⏳
+Pending), **U2 PR** (every `wso2-support` PR linked in the issue text or cross-referenced in its timeline) and
+**Master Fix** (the links given to `--public`). Prints the table, asks for
+confirmation (skip with `-y`), posts it as a comment and closes the issue.
+`--public N/A` means no public fix. Before closing, the issue is labelled
+`Resolution/Released in Public` (PR links) or `Resolution/Released N/A in
+public` (`N/A`). Without `--public`, the comment is still posted, but the
+issue is not labelled or closed. Refuses to post if the U2 isn't released unless `--force` is
+given. Setting
+`CLOSE_PATCH_ISSUE_JSON_FILE` tests against saved `gh issue view --json
+title,state,body,comments` output as a dry run.
 
 #### `backupPack <name>` / `backupPack -r <name>`
 Must be run from inside `APIM-packs-patches/wso2am-<version>/bin`. Zips the

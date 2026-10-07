@@ -37,29 +37,46 @@ checkManualFilesDs() {
   done
 
   # 4. Prompt for manual file paths, one at a time, validating immediately
-  #    against all three components. Once done, confirm before staging.
+  #    against all three components. A path only needs to exist in at least
+  #    one component — it's tracked (and later diffed) only where it exists.
+  #    Once done, confirm before staging.
   echo "───────────────────────────────────"
   echo "📝 Enter file paths (relative to each pack home), one per line."
   echo "   e.g. repository/resources/conf/templates/repository/conf/carbon.xml.j2"
-  echo "   Each path is checked against all three components (acp, tm, gw)."
+  echo "   Each path is checked against all three components (acp, tm, gw);"
+  echo "   it's tracked in whichever of them it exists in."
   echo "   Press Enter on an empty line when done."
 
   local -a FILES=()
-  local rel confirm
+  # "<label>|<path>" -> 1 for every component the path exists in
+  local -A PRESENT=()
+  local rel confirm f
   while true; do
     while true; do
-      read -r "rel?  > "
+      # EOF (e.g. piped stdin ran out) ends path entry like an empty line.
+      read -r "rel?  > " || break
       [[ -z "$rel" ]] && break
 
-      local -a missing_labels=()
+      local -a missing_labels=() present_labels=()
       for i in {1..3}; do
-        [[ ! -f "${TARGET_DIRS[$i]}/${rel}" ]] && missing_labels+=("${PACK_LABELS[$i]}")
+        if [[ -f "${TARGET_DIRS[$i]}/${rel}" ]]; then
+          present_labels+=("${PACK_LABELS[$i]}")
+        else
+          missing_labels+=("${PACK_LABELS[$i]}")
+        fi
       done
 
-      if [[ ${#missing_labels[@]} -eq 0 ]]; then
-        FILES+=("$rel")
-      else
-        echo "⚠️  Not found in [${(j:, :)missing_labels}]: $rel — check the path and try again."
+      if [[ ${#present_labels[@]} -eq 0 ]]; then
+        echo "⚠️  Not found in any component: $rel — check the path and try again."
+        continue
+      fi
+
+      (( ${FILES[(Ie)$rel]} )) || FILES+=("$rel")
+      for i in {1..3}; do
+        [[ -f "${TARGET_DIRS[$i]}/${rel}" ]] && PRESENT["${PACK_LABELS[$i]}|$rel"]=1
+      done
+      if [[ ${#missing_labels[@]} -gt 0 ]]; then
+        echo "ℹ️  Only in [${(j:, :)present_labels}] (not in [${(j:, :)missing_labels}]): $rel — tracking where present."
       fi
     done
 
@@ -70,12 +87,19 @@ checkManualFilesDs() {
 
     echo "───────────────────────────────────"
     echo "You entered ${#FILES[@]} file(s):"
-    local f
     for f in "${FILES[@]}"; do
-      echo "  - $f"
+      local -a in_labels=()
+      for i in {1..3}; do
+        (( ${+PRESENT["${PACK_LABELS[$i]}|$f"]} )) && in_labels+=("${PACK_LABELS[$i]}")
+      done
+      echo "  - $f [${(j:, :)in_labels}]"
     done
 
-    read -r "confirm?Finished entering paths? Proceed to staging update? (y/n) "
+    if ! read -r "confirm?Finished entering paths? Proceed to staging update? (y/n) "; then
+      # EOF here would otherwise loop forever re-prompting.
+      echo "❌ Error: No confirmation received (stdin closed). Aborting."
+      return 1
+    fi
     if [[ "$confirm" == "y" || "$confirm" == "Y" ]]; then
       break
     fi
@@ -84,10 +108,10 @@ checkManualFilesDs() {
 
   # 5. Snapshot the requested files (per component) before the staging update.
   local BASELINE_DIR=$(mktemp -d)
-  local f
   for i in {1..3}; do
     local LABEL="${PACK_LABELS[$i]}"
     for f in "${FILES[@]}"; do
+      (( ${+PRESENT["$LABEL|$f"]} )) || continue
       mkdir -p "$(dirname "${BASELINE_DIR}/${LABEL}/${f}")"
       cp "${TARGET_DIRS[$i]}/${f}" "${BASELINE_DIR}/${LABEL}/${f}"
     done
@@ -203,6 +227,11 @@ checkManualFilesDs() {
   for f in "${FILES[@]}"; do
     for i in {1..3}; do
       local LABEL="${PACK_LABELS[$i]}"
+      (( ${+PRESENT["$LABEL|$f"]} )) || continue
+      if [[ ! -f "${TARGET_DIRS[$i]}/${f}" ]]; then
+        echo "⚠️  [$LABEL] removed by staging update: $f"
+        continue
+      fi
       if git --no-pager diff --no-index --color=always -- "${BASELINE_DIR}/${LABEL}/${f}" "${TARGET_DIRS[$i]}/${f}" > /dev/null; then
         echo "✅ [$LABEL] unchanged: $f"
       else
