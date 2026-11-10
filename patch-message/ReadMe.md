@@ -26,11 +26,13 @@ Copy the `patch-message.bookmarklet.txt` snippet to use as your search engine UR
 
 ## 3. How to Use
 
-When you are on the UMT view update page:
+When you are on the UMT update page in One WSO2 (`https://one.wso2.com/engineering/umt/updates/<id>`), after it has finished loading:
 
 1. Press **`Cmd + L`** (Mac) or **`Ctrl + L`** (Windows) to highlight the address bar.
 2. Type **`pm`** and press **`Enter`**.
-3. The Update description will be copied to your clipboard and also logged in the browser console (in case of clipboard permission issues)
+3. The Update description will be copied to your clipboard and also logged in the browser console. A green "copied" notice appears at the top right.
+   If Chrome blocks the copy (it only allows clipboard writes right after a click/keypress on the page), an orange
+   "Click anywhere on the page to copy" notice appears instead — click anywhere on the page and it copies then.
   e.g 
   ```
   U2: 19763

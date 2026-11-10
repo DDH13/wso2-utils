@@ -1,9 +1,10 @@
 /**
  * WSO2 UMT Patch Message Generator
  *
- * Save as a Chrome DevTools Snippet (Sources > Snippets) and run it while the
- * active tab is the relevant update's page:
- *   https://umt.wso2.com/update?updateId=<id>&type=viewUpdate
+ * Save as a Chrome DevTools Snippet (Sources > Snippets) or use the
+ * bookmarklet, and run it while the active tab is the relevant update's page
+ * in the One WSO2 UMT UI:
+ *   https://one.wso2.com/engineering/umt/updates/<id>
  *
  * Builds a standardized patch status message from whatever is currently on
  * that page, logs it, and copies it to the clipboard for pasting into chat.
@@ -16,48 +17,110 @@
     }
 
     function getUpdateId(doc) {
-        const fromUrl = new URLSearchParams(location.search).get('updateId');
-        if (fromUrl) return fromUrl;
-        for (const script of doc.querySelectorAll('script')) {
-            const match = script.textContent.match(/var\s+updateId\s*=\s*"(\d+)"/);
-            if (match) return match[1];
-        }
+        const fromPath = location.pathname.match(/\/updates\/(\d+)/);
+        if (fromPath) return fromPath[1];
+        const fromQuery = new URLSearchParams(location.search).get('updateId');
+        if (fromQuery) return fromQuery;
         return 'UNKNOWN';
     }
 
-    function getInputValue(doc, id) {
-        const value = doc.querySelector(`input#${id}`)?.value?.trim();
+    // Header fields render as <div><p class="MuiTypography-body2">Label</p>
+    // <value element/></div> - the value is a <p>, a <div> (e.g. Worst Case
+    // Date, which carries a history icon) or an <a> for GitHub issues.
+    function getFieldValueElement(doc, label) {
+        const labelEl = [...doc.querySelectorAll('main p.MuiTypography-body2')]
+            .find(p => p.textContent.trim() === label);
+        return labelEl ? labelEl.nextElementSibling : null;
+    }
+
+    function getField(doc, label) {
+        const value = getFieldValueElement(doc, label)?.textContent?.trim();
         return isNA(value) ? null : value;
     }
 
-    function getPublicIssues(doc) {
-        return [...doc.querySelectorAll('tbody#issueList a')]
-            .map(a => a.href)
-            .filter(href => href && !isNA(href) && !/\/N\/A$/i.test(href));
+    function getFieldLink(doc, label) {
+        const el = getFieldValueElement(doc, label);
+        if (!el) return null;
+        const link = el.tagName === 'A' ? el : el.querySelector('a');
+        if (link && link.href) return link.href;
+        const value = el.textContent.trim();
+        return isNA(value) ? null : value;
     }
 
-    function getProductDivs(doc) {
-        // Fully applicable products live under #compatibleProducts; products
-        // where only some of the changed files apply get their own
-        // #partialApplicableProducts section instead. Both have the same
-        // per-product file-change table shape, so file-row extraction wants
-        // both - getApplicableComponents queries them separately below to
-        // tell full vs. partial apart.
-        return [
-            ...doc.querySelectorAll('#compatibleProducts > div[name]'),
-            ...doc.querySelectorAll('#partialApplicableProducts > div[name]'),
-        ];
+    // Each page section is an <h5> title plus an MUI DataGrid. Walk up from
+    // the title to the first ancestor holding a grid - but stop if that
+    // ancestor also holds another section title, since an empty section has
+    // no grid of its own and would otherwise pick up the next section's.
+    function getSectionGrids(doc, title) {
+        const main = doc.querySelector('main') || doc.body;
+        const heading = [...main.querySelectorAll('h5')].find(h => h.textContent.trim() === title);
+        if (!heading) return [];
+        for (let el = heading.parentElement; el && el !== main.parentElement; el = el.parentElement) {
+            if ([...el.querySelectorAll('h5')].some(h => h !== heading)) return [];
+            const grids = el.querySelectorAll('.MuiDataGrid-root');
+            if (grids.length) return [...grids];
+        }
+        return [];
+    }
+
+    // Read cells only - a grid's own textContent includes injected <style>.
+    function gridRows(grid) {
+        const rows = [...grid.querySelectorAll('.MuiDataGrid-row[data-id]')].map(row => {
+            const cells = {};
+            row.querySelectorAll('[role=gridcell][data-field]').forEach(cell => {
+                cells[cell.getAttribute('data-field')] = cell.textContent.trim();
+            });
+            return cells;
+        });
+        const expected = Number(grid.querySelector('[role=grid]')?.getAttribute('aria-rowcount')) - 1;
+        if (expected > rows.length) {
+            console.warn(`patch-message: grid shows ${rows.length} of ${expected} rows - some may be missing.`);
+        }
+        return rows;
+    }
+
+    function gridHasColumn(grid, field) {
+        return !!grid.querySelector(`[role=columnheader][data-field="${field}"]`);
+    }
+
+    function getSectionValues(doc, title, field) {
+        return getSectionGrids(doc, title)
+            .flatMap(gridRows)
+            .map(row => row[field])
+            .filter(value => !isNA(value));
+    }
+
+    function getPublicIssues(doc) {
+        return getSectionValues(doc, 'Public GitHub Issues', 'value');
     }
 
     function getSecurityAdvisories(doc) {
-        // No stable id on this panel - locate it by its heading text and
-        // read every row of its (single-column) table. The whole panel is
-        // omitted from the DOM entirely when the update isn't a security fix.
-        const heading = [...doc.querySelectorAll('h2')].find(h => h.textContent.trim() === 'Security Advisories');
-        const panel = heading ? heading.closest('.x_panel') : null;
-        if (!panel) return [];
-        return [...panel.querySelectorAll('tbody tr td')]
-            .map(td => td.textContent.trim())
+        // The whole section is omitted when the update isn't a security fix.
+        return getSectionValues(doc, 'Security Advisories', 'security-advisory');
+    }
+
+    // "Product Analysis Results" has one block per applicable product: an
+    // <h6> "<product> - <version>" with a sibling "Fully Applicable" /
+    // "Partially Applicable" chip, followed by that product's file-change grid.
+    function getProductBlocks(doc) {
+        const main = doc.querySelector('main') || doc.body;
+        const sectionHeading = [...main.querySelectorAll('h5')]
+            .find(h => h.textContent.trim() === 'Product Analysis Results');
+        if (!sectionHeading) return [];
+        return [...main.querySelectorAll('h6')]
+            .filter(h6 => sectionHeading.compareDocumentPosition(h6) & Node.DOCUMENT_POSITION_FOLLOWING)
+            .map(h6 => {
+                const match = h6.textContent.trim().match(/^(\S+)\s+-\s+(\S+)$/);
+                if (!match) return null;
+                const chip = h6.parentElement.querySelector('.MuiChip-root')?.textContent?.trim() || '';
+                const block = h6.parentElement.parentElement;
+                return {
+                    name: match[1],
+                    version: match[2],
+                    partial: /partial/i.test(chip),
+                    grids: [...block.querySelectorAll('.MuiDataGrid-root')],
+                };
+            })
             .filter(Boolean);
     }
 
@@ -72,18 +135,19 @@
 
     function getFileRows(doc) {
         // The same file change is listed once per applicable product
-        // profile (wso2am, wso2am-tm, ...) - dedupe across profiles.
-        // Each product also has a separate "Bundles Info Changes" table
-        // (id="budlesInfoChanges" - a WSO2 typo, not "bundles") listing
-        // bundles.info rows keyed by jar name/version, not File/Operation -
-        // exclude it, we only want the file-changes table.
+        // profile (wso2am, wso2am-tm, ...) - dedupe across profiles. Only
+        // grids with a File column count, which skips any bundles-info style
+        // table keyed by jar name/version instead.
         const seen = new Map();
-        getProductDivs(doc).forEach(div => {
-            div.querySelectorAll('table:not(#budlesInfoChanges) tbody tr').forEach(tr => {
-                const cells = [...tr.children].map(td => td.textContent.trim());
-                if (!cells[0]) return;
-                const key = `${cells[1] || ''}::${cells[0]}`;
-                if (!seen.has(key)) seen.set(key, { file: cells[0], operation: cells[1] || '' });
+        getProductBlocks(doc).forEach(product => {
+            product.grids.filter(grid => gridHasColumn(grid, 'file')).forEach(grid => {
+                gridRows(grid).forEach(row => {
+                    const file = row.file;
+                    if (!file) return;
+                    const operation = row.operation || '';
+                    const key = `${operation}::${file}`;
+                    if (!seen.has(key)) seen.set(key, { file, operation });
+                });
             });
         });
         return [...seen.values()];
@@ -112,7 +176,7 @@
     }
 
     // Groups rows into "<label>:" bullet lists, in a fixed label order,
-    // skipping any that are empty. `labelFor` maps a row's raw DOM
+    // skipping any that are empty. `labelFor` maps a row's raw
     // operation (Modified/Added/Removed) to the display label to group by.
     function groupRowsByOperation(rows, orderedLabels, labelFor) {
         const byLabel = new Map();
@@ -145,35 +209,52 @@
         return sections.length ? sections.join('\n') : null;
     }
 
+    // The new UI shows dates like "19 Nov 2026" / "03 Sept 2026" - print
+    // them as YYYY-MM-DD, like the old UI did.
+    function formatDate(date) {
+        const pad = n => String(n).padStart(2, '0');
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    }
+
+    function parseDate(text) {
+        if (!text) return null;
+        let date = new Date(text);
+        if (isNaN(date)) date = new Date(text.replace(/\bSept\b/, 'Sep'));
+        return isNaN(date) ? null : date;
+    }
+
     function getClosestEta(doc) {
         // Best/Most Likely/Worst Case are three estimates for the same
         // event - only show the soonest one that hasn't already passed
         // (falling through to the next if it has). If all three are
         // already in the past, fall back to the latest of them.
         const candidates = [
-            { label: 'Best Case', date: getInputValue(doc, 'bestCase') },
-            { label: 'Most Likely', date: getInputValue(doc, 'mostLikely') },
-            { label: 'Worst Case', date: getInputValue(doc, 'worstCase') },
+            { label: 'Best Case', date: parseDate(getField(doc, 'Best Case Date')) },
+            { label: 'Most Likely', date: parseDate(getField(doc, 'Most Likely Date')) },
+            { label: 'Worst Case', date: parseDate(getField(doc, 'Worst Case Date')) },
         ].filter(c => c.date);
         if (candidates.length === 0) return null;
 
-        candidates.sort((a, b) => new Date(a.date) - new Date(b.date));
+        candidates.sort((a, b) => a.date - b.date);
 
         const today = new Date();
         today.setHours(0, 0, 0, 0);
-        return candidates.find(c => new Date(c.date) >= today) || candidates[candidates.length - 1];
+        const chosen = candidates.find(c => c.date >= today) || candidates[candidates.length - 1];
+        return { label: chosen.label, date: formatDate(chosen.date) };
     }
 
     function hasLifecycleState(doc) {
         // Staging build status / Manual Testing always print PENDING (they
         // get updated by hand once actually verified) - this just gates
-        // whether to show those lines at all, by checking a lifecycle badge
-        // is present (the last ".wum_badge" span right before the
-        // lifecycle-history button).
-        const anchor = doc.getElementById('btnShowLifecycleStateChangeLogModal');
-        let el = anchor ? anchor.previousElementSibling : null;
-        while (el && !el.classList.contains('wum_badge')) el = el.previousElementSibling;
-        return !!(el && el.textContent.trim());
+        // whether to show those lines at all. The header chips next to the
+        // "Update #<id>" title are [type, lifecycle, state].
+        const title = doc.querySelector('main h2');
+        const header = title ? title.parentElement.parentElement : null;
+        if (!header) return false;
+        const chips = [...header.querySelectorAll('.MuiChip-root')]
+            .map(chip => chip.textContent.trim())
+            .filter(text => !/applicable/i.test(text));
+        return chips.length >= 3 && !!chips[2];
     }
 
     const COMPONENT_LABELS = [
@@ -185,26 +266,22 @@
 
     // The AIO/ACP/TM/UGW product split only exists from APIM 4.5.0 onward -
     // earlier updates only ever shipped the single wso2am pack, so calling
-    // out "applicable components" there would be meaningless noise. Read the
-    // version off the first row of the products table (every row shares the
-    // same major.minor.patch - only the trailing build number differs per
-    // component).
-    function meetsMinApimVersion(doc, minMajor, minMinor) {
-        const versionText = doc.querySelector('#productTable tbody tr td:nth-child(2)')?.textContent?.trim();
-        const match = versionText && versionText.match(/^(\d+)\.(\d+)/);
+    // out "applicable components" there would be meaningless noise. Every
+    // product block shares the same major.minor.patch - only the trailing
+    // build number differs per component.
+    function meetsMinApimVersion(products, minMajor, minMinor) {
+        const product = products.find(p => p.name.startsWith('wso2am'));
+        const match = product && product.version.match(/^(\d+)\.(\d+)/);
         if (!match) return false;
         const [major, minor] = [Number(match[1]), Number(match[2])];
         return major > minMajor || (major === minMajor && minor >= minMinor);
     }
 
     function getApplicableComponents(doc) {
-        if (!meetsMinApimVersion(doc, 4, 5)) return null;
-        const fullNames = new Set(
-            [...doc.querySelectorAll('#compatibleProducts > div[name]')].map(div => div.getAttribute('name')),
-        );
-        const partialNames = new Set(
-            [...doc.querySelectorAll('#partialApplicableProducts > div[name]')].map(div => div.getAttribute('name')),
-        );
+        const products = getProductBlocks(doc);
+        if (!meetsMinApimVersion(products, 4, 5)) return null;
+        const fullNames = new Set(products.filter(p => !p.partial).map(p => p.name));
+        const partialNames = new Set(products.filter(p => p.partial).map(p => p.name));
         if (fullNames.size <= 1 && partialNames.size === 0) return null; // only the default AIO pack - not worth calling out
         const fullLabels = COMPONENT_LABELS.filter(([name]) => fullNames.has(name)).map(([, label]) => label);
         const partialLabels = COMPONENT_LABELS.filter(([name]) => partialNames.has(name))
@@ -216,10 +293,10 @@
     function buildPatchMessage(doc = document) {
         const lines = [`U2: ${getUpdateId(doc)}`];
 
-        const internalIssue = getInputValue(doc, 'internalGitIssue');
+        const internalIssue = getFieldLink(doc, 'Internal GitHub Issue');
         if (internalIssue) lines.push(`Internal Issue: ${internalIssue}`);
 
-        const securityIssue = getInputValue(doc, 'securityInternalGitIssue');
+        const securityIssue = getFieldLink(doc, 'Security Internal GitHub Issue');
         if (securityIssue) lines.push(`Security Internal Issue: ${securityIssue}`);
 
         const securityAdvisories = getSecurityAdvisories(doc);
@@ -266,36 +343,75 @@
         return lines.join('\n');
     }
 
+    // Avoid percent signs in this file: the bookmarklet is pasted into a
+    // Chrome site-search URL, which percent-decodes it.
+    const TOAST_ID = 'patch-message-toast';
+
+    function showToast(message, color) {
+        document.getElementById(TOAST_ID)?.remove();
+        const toast = document.createElement('div');
+        toast.id = TOAST_ID;
+        toast.textContent = message;
+        Object.assign(toast.style, {
+            position: 'fixed', top: '16px', right: '16px',
+            zIndex: '2147483647', padding: '10px 16px', borderRadius: '6px', background: color, color: '#fff',
+            font: '14px/1.4 sans-serif', boxShadow: '0 4px 12px rgba(0,0,0,.4)', cursor: 'pointer',
+        });
+        document.body.appendChild(toast);
+        return toast;
+    }
+
+    // Synchronous execCommand copy - returns whether it actually worked
+    // (it returns false rather than throwing when Chrome refuses).
+    function execCopy(text) {
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        try {
+            return document.execCommand('copy');
+        } catch (err) {
+            return false;
+        } finally {
+            document.body.removeChild(textarea);
+        }
+    }
+
+    function tryCopy(text) {
+        if (execCopy(text)) return Promise.resolve();
+        if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+        return Promise.reject(new Error('Clipboard unavailable'));
+    }
+
     function copyToClipboard(text) {
-        // Snippets usually run without the document itself focused (DevTools
-        // has focus instead), which makes navigator.clipboard.writeText
-        // reject with "Document is not focused". Fall back to the older
-        // execCommand('copy'), which tolerates that better.
-        function fallbackCopy() {
-            const textarea = document.createElement('textarea');
-            textarea.value = text;
-            textarea.style.position = 'fixed';
-            textarea.style.opacity = '0';
-            document.body.appendChild(textarea);
-            textarea.focus();
-            textarea.select();
-            try {
-                document.execCommand('copy');
-                console.log('%cCopied to clipboard.', 'color: #2ecc71');
-            } catch (err) {
-                console.error('Could not copy to clipboard:', err);
-            } finally {
-                document.body.removeChild(textarea);
-            }
+        function onCopied() {
+            console.log('Copied to clipboard.');
+            const toast = showToast('Patch message copied to clipboard', '#2e7d32');
+            setTimeout(() => toast.remove(), 2500);
         }
 
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(text)
-                .then(() => console.log('%cCopied to clipboard.', 'color: #2ecc71'))
-                .catch(fallbackCopy);
-        } else {
-            fallbackCopy();
+        // Chrome only allows clipboard writes right after a user gesture on
+        // the page. Run from the address bar (or a DevTools snippet) there
+        // often isn't one, and both copy methods are refused. In that case,
+        // copy on the next click/keypress anywhere on the page instead.
+        function copyOnNextGesture() {
+            console.warn('Clipboard write was blocked - click anywhere on the page to copy.');
+            showToast('Click anywhere on the page to copy the patch message', '#e65100');
+            const events = ['pointerup', 'keydown'];
+            const handler = () => {
+                events.forEach(type => document.removeEventListener(type, handler, true));
+                tryCopy(text).then(onCopied).catch(err => {
+                    console.error('Could not copy to clipboard:', err);
+                    showToast('Could not copy - copy the message from the console', '#c62828');
+                });
+            };
+            events.forEach(type => document.addEventListener(type, handler, true));
         }
+
+        tryCopy(text).then(onCopied).catch(copyOnNextGesture);
     }
 
     // Expose for ad-hoc re-runs from the console without re-pasting the snippet.
