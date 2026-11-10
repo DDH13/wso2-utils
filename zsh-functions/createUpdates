@@ -134,28 +134,45 @@ createUpdates() {
       DEF_SECURITY=y
     fi
 
-    echo "   $(jq -r '.title' <<<"$OJSON")"
-    echo
-    local PK PV PR PN PS PD PT XNOTE
+    # Group the ports into "will get an update" and "ignored" lines.
+    local PK PV PR PN PS PD PT REF_TXT
+    local -a USE_LINES SKIP_LINES
     while IFS=$'\t' read -r PK PV PR PN PS PD PT; do
       [[ -z "$PV" ]] && continue
+      REF_TXT="#${PN}"
+      [[ "$PR" != "$OREPO" ]] && REF_TXT="${PR}#${PN}"
       if [[ "$PK" != y ]]; then
-        echo "   ⏭️  ${PV} → ${PR}#${PN} [${PS}]: not Open / In Progress / PR Sent, ignored"
+        SKIP_LINES+=("$(printf '  %-7s %-8s %s' "$PV" "$REF_TXT" "$PS")")
         continue
       fi
-      XNOTE=""
-      (( PD > 1 )) && XNOTE=" ⚠️ ${PD} Open/In Progress/PR Sent issues for ${PV}, using this one"
-      echo "   ${PV} → ${PR}#${PN} [${PS}]: ${PT}${XNOTE}"
+      USE_LINES+=("$(printf '  %-7s %-8s %s' "$PV" "$REF_TXT" "$PS")${${PD:#1}:+  ⚠️ ${PD} candidates for ${PV}, using this one}")
       VERSIONS+=("$PV"); REPOS+=("$PR"); NUMS+=("$PN")
     done <<<"$PORTS"
-    echo "   Security: ${DEF_SECURITY}${DEF_SEC_URL:+ (${DEF_SEC_URL})} | Public issue: ${DEF_PUB_URL:-none found}"
+
+    local SEC_TXT="no" PUB_TXT="${DEF_PUB_URL:-none found}"
+    if [[ "$DEF_SECURITY" == y ]]; then
+      SEC_TXT="yes (${DEF_SEC_URL:-no security-internals link found, you'll be asked})"
+    fi
+    echo
+    printf '%-15s %s\n' "Original issue" "#${ONUM}: $(jq -r '.title' <<<"$OJSON")"
+    printf '%-15s %s\n' "Security" "$SEC_TXT"
+    printf '%-15s %s\n' "Public issue" "$PUB_TXT"
+    echo
+    if (( ${#USE_LINES} )); then
+      echo "✅ Forward ports to create updates for (${#USE_LINES}):"
+      printf '%s\n' "${USE_LINES[@]}"
+    fi
+    if (( ${#SKIP_LINES} )); then
+      echo "⏭️  Ignored, status not Open / In Progress / PR Sent (${#SKIP_LINES}):"
+      printf '%s\n' "${SKIP_LINES[@]}"
+    fi
     echo
 
     if (( ${#VERSIONS} == 0 )); then
-      echo "⚠️  No [ForwardPort][x.y.z] issues are linked to ${OREPO}#${ONUM}. Enter them manually."
+      echo "⚠️  No eligible [ForwardPort][x.y.z] issues linked to #${ONUM}. Enter them manually."
     else
       ANS=""
-      read "ANS?Use these ${#VERSIONS} issue(s)? [Y/n]: " || return 1
+      read "ANS?Create updates for ${(j:, :)VERSIONS}? [Y/n]: " || return 1
       if [[ "${(L)ANS}" == (n|no) ]]; then
         VERSIONS=() REPOS=() NUMS=()
       fi
