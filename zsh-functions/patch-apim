@@ -5,20 +5,36 @@ patch-apim() {
     while getopts "t" opt; do
         case "$opt" in
             t) DIRECT_REPLACE=true ;;
-            *) echo "Usage: patch-apim [-t] <version> <file1> <file2>..."; return 1 ;;
+            *) echo "Usage: patch-apim [-t] <version|master> <file1> <file2>..."; return 1 ;;
         esac
     done
     shift $((OPTIND-1))
 
     if [[ "$#" -lt 2 ]]; then
-        echo "Usage: patch-apim [-t] <version> <file1> <file2>..."
+        echo "Usage: patch-apim [-t] <version|master> <file1> <file2>..."
         return 1
     fi
 
     local VERSION=$1
     shift 
-    local BASE_PATH="/Users/dineth/Code/APIM-packs-patches/wso2am-$VERSION"
-    
+    local PACKS_DIR="/Users/dineth/Code/APIM-packs-patches"
+    local PACK_NAME="wso2am-$VERSION"
+
+    if [[ "$VERSION" == "master" ]]; then
+        # Pack extracted by freshPackMaster; fall back to the latest SNAPSHOT pack
+        PACK_NAME="wso2am-4.7.0-SNAPSHOT"
+        if [[ ! -d "$PACKS_DIR/$PACK_NAME" ]]; then
+            PACK_NAME=$(ls -1d "$PACKS_DIR"/wso2am-*-SNAPSHOT(N/) 2>/dev/null | xargs -n1 basename | sort -V | tail -n 1)
+            if [[ -z "$PACK_NAME" ]]; then
+                echo "Error: No SNAPSHOT pack found in $PACKS_DIR"
+                return 1
+            fi
+            echo "ℹ️  freshPackMaster pack not found, using latest SNAPSHOT: $PACK_NAME"
+        fi
+    fi
+
+    local BASE_PATH="$PACKS_DIR/$PACK_NAME"
+
     if [[ ! -d "$BASE_PATH" ]]; then
         echo "Error: APIM pack directory not found at $BASE_PATH"
         return 1
@@ -98,5 +114,5 @@ patch-apim() {
     done
 
     echo "---"
-    echo "Processing complete for wso2am-$VERSION"
+    echo "Processing complete for $PACK_NAME"
 }

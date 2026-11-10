@@ -175,7 +175,9 @@ EOF
     echo "    -> ${trust_dir}"
     # Drop any stale alias first so re-running against an already-configured pack
     # doesn't fail with "Certificate not imported, alias <...> already exists".
-    keytool -delete -alias wso2is_cert -keystore "${trust_dir}/client-truststore.jks" -storepass "${cert_password}" 2>/dev/null
+    if keytool -list -alias wso2is_cert -keystore "${trust_dir}/client-truststore.jks" -storepass "${cert_password}" >/dev/null 2>&1; then
+      keytool -delete -alias wso2is_cert -keystore "${trust_dir}/client-truststore.jks" -storepass "${cert_password}" >/dev/null 2>&1
+    fi
     # Use -noprompt to automatically answer "yes" to the trust question.
     keytool -import -alias wso2is_cert -file "${is_sec_dir}/${cert_filename}" -keystore "${trust_dir}/client-truststore.jks" -storepass "${cert_password}" -noprompt \
       || { echo "❌ Error: Failed to import IS certificate into truststore in ${trust_dir}." >&2; rm -f "${is_sec_dir}/${cert_filename}"; return 1; }
@@ -194,7 +196,9 @@ EOF
   echo "  (2/3) Importing AM certificate into IS truststore (client-truststore.p12)..."
   # Drop any stale alias first so re-running against an already-configured pack
   # doesn't fail with "Certificate not imported, alias <...> already exists".
-  keytool -delete -alias wso2am_cert -keystore "${is_sec_dir}/client-truststore.p12" -storepass "${cert_password}" 2>/dev/null
+  if keytool -list -alias wso2am_cert -keystore "${is_sec_dir}/client-truststore.p12" -storepass "${cert_password}" >/dev/null 2>&1; then
+    keytool -delete -alias wso2am_cert -keystore "${is_sec_dir}/client-truststore.p12" -storepass "${cert_password}" >/dev/null 2>&1
+  fi
   keytool -import -alias wso2am_cert -file "${am_sec_dir}/${cert_filename}" -keystore "${is_sec_dir}/client-truststore.p12" -storepass "${cert_password}" -noprompt \
     || { echo "❌ Error: Failed to import AM certificate into IS truststore." >&2; rm -f "${am_sec_dir}/${cert_filename}"; return 1; }
 

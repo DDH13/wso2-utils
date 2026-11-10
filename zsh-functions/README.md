@@ -246,6 +246,34 @@ One-time wiring between a WSO2 IS and APIM pack pair in
 exchanges TLS certificates so each product trusts the other
 (`wso2carbon` keystore/truststore in both directions).
 
+Pass `--DS` to wire IS against the distributed setup (ACP/TM/GW in
+`apim-distributed-dev-setup/components`) instead of the all-in-one AM pack. In
+that mode the script also sets IS's port offset to 3 (9446) and imports the IS
+cert into the ACP, TM and gateway truststores.
+
+**Running APIM on 9443 and IS on 9444** (all-in-one, no `--DS`): the script
+never sets a port offset in this mode, so IS would start on 9443 and clash with
+APIM. Run the script, then give IS an offset of 1:
+
+```
+configureIS7 7.1.0 4.5.0        # <is_version> <am_version>
+```
+
+Then in `wso2is-<is_version>/repository/conf/deployment.toml` add:
+
+```toml
+[server]
+offset = 1
+```
+
+- The notification endpoint the script writes
+  (`https://localhost:9443/internal/data/v1/notify`) already points at APIM on
+  9443, so it needs no change.
+- Start APIM, then IS. When you register IS as a Key Manager in the Admin
+  portal, use the 9444 URLs (e.g. `https://localhost:9444/oauth2/token`).
+- The script is safe to re-run. It skips the `deployment.toml` append if the
+  block is already there and replaces the cert aliases.
+
 ### Git / branch workflow
 
 #### `newbranch [-f] <issue_number> <branch_number>`
