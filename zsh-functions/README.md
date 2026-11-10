@@ -192,6 +192,38 @@ given. Setting
 `CLOSE_PATCH_ISSUE_JSON_FILE` tests against saved `gh issue view --json
 title,state,body,comments` output as a dry run.
 
+#### `createUpdates [-y] [--dry-run] [--deduce <original issue>]`
+Creates Proactive UMT updates for `wso2am` from GitHub, one issue per APIM
+version. Prompts for `version → issue` pairs (a bare number assumes
+`wso2-enterprise/wso2-apim-internal`; blank version to finish), then — once,
+shared by every issue — the issue type (Bug / Improvement / Feature), whether
+it's a security fix (asks for the Security Internal Git issue URL, required;
+else the public issue URL, optional — blank omits it) and the best-case ETA
+(must be a Thursday; most likely = +1 week, worst = +3 weeks). Each issue is
+checked with `gh`: issues that already carry a `umt/state/*` label (an update
+exists) are skipped. Prints the plan, asks for confirmation (skip with `-y`)
+and comments on each issue:
+
+```
+/umt create --product wso2am 4.5.0 --type Bug --proactive --eta 2026-11-26,2026-12-03,2026-12-17 --public-issue <url>
+```
+
+(`--security-issue <url>` instead of `--public-issue` for security fixes.)
+`--dry-run` prints the comments without posting.
+
+`--deduce <original issue>` reads the original issue instead of asking for the
+pairs: every cross-referenced `[ForwardPort][x.y.z]` issue whose project
+board Status (e.g. *APIM Patches*) is **Open**, **In Progress** or **PR Sent** becomes a
+`version → issue` pair (issues on no project count if they're open; others are
+listed as ignored). Sorted by version, and accepted with Enter (`n` falls back to manual entry). It also
+pre-fills the security answer (`Type/Security` label or a
+`security-internals` link), the Security Internal URL and the public issue
+URL (`Public Git Issue :` line or a `github.com/wso2/*/issues/N` link) from
+the body and comments — Enter accepts, or edit them in place. See the UMT
+[developer guide](https://github.com/wso2-enterprise/updates-creation/blob/1.x.x/updates-orchestrator/docs/developer-guide.md).
+Reading the Status needs the `read:project` scope on the `gh` token
+(`gh auth refresh -s read:project`); without it, it falls back to open/closed.
+
 #### `backupPack <name>` / `backupPack -r <name>`
 Must be run from inside `APIM-packs-patches/wso2am-<version>/bin`. Zips the
 whole pack directory to `APIM-packs-patches/backups/wso2am-<version>-<name>.zip`
